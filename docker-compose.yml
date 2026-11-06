@@ -1,0 +1,77 @@
+# Sentinel pre-build stubs — paper trading only. Dashboard/CRT stays external.
+services:
+  market-ingest:
+    build: ./services/market-ingest
+    ports:
+      - "${MARKET_INGEST_PORT:-8001}:8001"
+    environment:
+      - PORT=8001
+      - SEED_OHLCV_PATH=/data/ohlcv_sample.csv
+      - SEED_NEWS_PATH=/data/news_sample.json
+    volumes:
+      - ./seeds:/data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  strategy-engine:
+    build: ./services/strategy-engine
+    ports:
+      - "${STRATEGY_ENGINE_PORT:-8002}:8002"
+    environment:
+      - PORT=8002
+      - MARKET_INGEST_URL=http://market-ingest:8001
+    depends_on:
+      - market-ingest
+
+  risk-guard:
+    build: ./services/risk-guard
+    ports:
+      - "${RISK_GUARD_PORT:-8003}:8003"
+    environment:
+      - PORT=8003
+      - KILL_SWITCH_DEFAULT=${KILL_SWITCH_DEFAULT:-true}
+      - RISK_MAX_POSITION_PCT=${RISK_MAX_POSITION_PCT:-0.05}
+      - RISK_STOP_LOSS_PCT=${RISK_STOP_LOSS_PCT:-0.02}
+      - RISK_DAILY_LOSS_LIMIT=${RISK_DAILY_LOSS_LIMIT:-0.03}
+
+  paper-broker:
+    build: ./services/paper-broker
+    ports:
+      - "${PAPER_BROKER_PORT:-8004}:8004"
+    environment:
+      - PORT=8004
+      - PAPER_STARTING_CASH=${PAPER_STARTING_CASH:-100000}
+      - RISK_GUARD_URL=http://risk-guard:8003
+    depends_on:
+      - risk-guard
+
+  agent-orchestrator:
+    build: ./services/agent-orchestrator
+    ports:
+      - "${AGENT_ORCHESTRATOR_PORT:-8005}:8005"
+    environment:
+      - PORT=8005
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_DAILY_TOKEN_CAP=${LLM_DAILY_TOKEN_CAP:-50000}
+      - MARKET_INGEST_URL=http://market-ingest:8001
+      - STRATEGY_ENGINE_URL=http://strategy-engine:8002
+      - RISK_GUARD_URL=http://risk-guard:8003
+      - PAPER_BROKER_URL=http://paper-broker:8004
+      - JOURNAL_API_URL=http://journal-api:8006
+    depends_on:
+      - market-ingest
+      - strategy-engine
+      - risk-guard
+      - paper-broker
+      - journal-api
+
+  journal-api:
+    build: ./services/journal-api
+    ports:
+      - "${JOURNAL_API_PORT:-8006}:8006"
+    environment:
+      - PORT=8006

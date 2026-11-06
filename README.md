@@ -1,0 +1,50 @@
+# Sentinel (AgentX 2026 PS-02)
+
+Paper-trading agentic assistant for team **Chaithu1705**. **No live money.**
+
+## Quick start (Python only — no Docker)
+
+```bash
+cd /workspace/agentx/build   # or your clone root
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp env.example .env          # optional; defaults work for localhost
+python scripts/run_all.py
+```
+
+Health checks:
+
+| Service | URL |
+|---------|-----|
+| market-ingest | http://127.0.0.1:8001/health |
+| strategy-engine | http://127.0.0.1:8002/health |
+| risk-guard | http://127.0.0.1:8003/health |
+| paper-broker | http://127.0.0.1:8004/health |
+| agent-orchestrator | http://127.0.0.1:8005/health |
+| journal-api | http://127.0.0.1:8006/health |
+| dashboard-ui | http://127.0.0.1:8010/ |
+
+Demo (second terminal, services already up):
+
+```bash
+source .venv/bin/activate
+python scripts/demo_run.py
+```
+
+## What it does (PS-02)
+
+- **Paper trading only** — simulated fills in `paper-broker`
+- **Hard risk** — position %, stop-loss %, daily loss, max trades/day, min RR (`risk-guard`)
+- **Human kill switch** — persisted under `data/kill_switch.json`; agent cannot bypass; fail-closed
+- **Backtest vs buy-and-hold** — SMA crossover in `strategy-engine`
+- **Plain-language journal** — template text per trade (`journal-api`)
+- **Agent = tool loop** — orchestrator calls APIs (not a chatbot)
+
+## Docs
+
+- [PREBUILD_RUNBOOK.md](./PREBUILD_RUNBOOK.md)
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [GITHUB_SETUP.md](./GITHUB_SETUP.md)
+
+Docker compose files may still exist for optional use; **primary path is uvicorn via `scripts/run_all.py`.**
