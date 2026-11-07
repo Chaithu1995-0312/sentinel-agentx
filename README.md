@@ -37,7 +37,8 @@ python scripts/demo_run.py
 - **Paper trading only** — simulated fills in `paper-broker`
 - **Hard risk** — position %, stop-loss %, daily loss, max trades/day, min RR (`risk-guard`)
 - **Human kill switch** — persisted under `data/kill_switch.json`; agent cannot bypass; fail-closed
-- **Backtest vs buy-and-hold** — SMA crossover in `strategy-engine`
+- **Backtest vs buy-and-hold** — SMA crossover, RSI(2) mean reversion, and Bollinger breakout. The orchestrator picks the best score, `return - 0.5 * max drawdown`, and journals the comparison. Buy-and-hold is the benchmark only.
+- **News-aware signals** — lexicon sentiment in `strategy-engine` (no LLM). Strongly negative news vetoes a buy; positive news raises confidence by 0.10. The signal carries `news_score` and `news_reason`, and the journal says them in plain English. The seed's 2025-08-27 stress headline vetoes that day's SMA buy.
 - **Plain-language journal** — template text per trade (`journal-api`)
 - **Agent = tool loop** — orchestrator calls APIs (not a chatbot)
 
