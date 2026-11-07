@@ -7,9 +7,9 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-app = FastAPI(title="sentinel-agent-orchestrator", version="0.1.0")
+app = FastAPI(title="sentinel-agent-orchestrator", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,11 +50,18 @@ def tool_get_market(client: httpx.Client, symbol: str) -> dict[str, Any]:
 
 
 def tool_run_backtest(client: httpx.Client, symbol: str) -> dict[str, Any]:
-    return client.post(f"{STRATEGY_URL}/backtest", json={"symbol": symbol}).json()
+    r = client.post(f"{STRATEGY_URL}/backtest", json={"symbol": symbol})
+    r.raise_for_status()
+    return r.json()
 
 
-def tool_signal(client: httpx.Client, symbol: str) -> dict[str, Any]:
-    return client.post(f"{STRATEGY_URL}/signal", json={"symbol": symbol}).json()
+def tool_signal(client: httpx.Client, symbol: str, strategy: str) -> dict[str, Any]:
+    r = client.post(
+        f"{STRATEGY_URL}/signal",
+        json={"symbol": symbol, "strategy": strategy},
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 def tool_kill(client: httpx.Client) -> dict[str, Any]:
@@ -75,6 +82,116 @@ def tool_place_order(client: httpx.Client, payload: dict[str, Any]) -> dict[str,
 
 def tool_journal(client: httpx.Client, payload: dict[str, Any]) -> dict[str, Any]:
     return client.post(f"{JOURNAL_URL}/trade", json=payload).json()
+
+
+def _trade_phrase(n: int) -> str:
+    return f"{n} trade" if int(n) == 1 else f"{n} trades"
+
+
+def pick_strategy(bt: dict[str, Any]) -> tuple[str, str]:
+    """Pick the trading strategy with the best return-minus-drawdown score.
+
+    score = return - drawdown_penalty * max_drawdown. Buy-and-hold is the
+    benchmark in the report and is not eligible.
+    """
+    penalty = float(bt.get("drawdown_penalty", 0.5))
+    rows = list(bt.get("strategies") or [])
+    if not rows:
+        raise HTTPException(502, "backtest returned no strategies")
+
+    def sort_key(row: dict[str, Any]) -> tuple:
+        score = float(row["return"]) - penalty * float(row["max_drawdown"])
+        return (-score, -float(row["return"]), int(row["trades"]), str(row["name"]))
+
+    ranked = sorted(rows, key=sort_key)
+    best = ranked[0]
+    if best["name"] == bt.get("selected_strategy") and bt.get("selection_reason"):
+        return str(best["name"]), str(bt["selection_reason"])
+
+    def _score(row: dict[str, Any]) -> float:
+        return round(float(row["return"]) - penalty * float(row["max_drawdown"]), 6)
+
+    parts = [
+        (
+            f"Selected {best['name']} because its score {_score(best):.4f} "
+            f"is the best trading strategy. "
+            f"Score = return - {penalty:g} * max drawdown."
+        ),
+        (
+            f"{best['name']} return {float(best['return']) * 100:.2f}%, "
+            f"max drawdown {float(best['max_drawdown']) * 100:.2f}%, "
+            f"{_trade_phrase(best['trades'])}."
+        ),
+    ]
+    for other in ranked[1:]:
+        parts.append(
+            f"{other['name']} score {_score(other):.4f} "
+            f"(return {float(other['return']) * 100:.2f}%, "
+            f"max drawdown {float(other['max_drawdown']) * 100:.2f}%, "
+            f"{_trade_phrase(other['trades'])})."
+        )
+    bh = bt.get("buy_hold") or {}
+    if bh:
+        parts.append(
+            f"Buy-and-hold return {float(bh['return']) * 100:.2f}%, "
+            f"max drawdown {float(bh['max_drawdown']) * 100:.2f}%, "
+            f"{_trade_phrase(bh['trades'])}. "
+            "Buy-and-hold is the benchmark, not a candidate the agent can switch into."
+        )
+    return str(best["name"]), " ".join(parts)
+
+
+def _bt_brief(bt: dict[str, Any], chosen: str) -> dict[str, Any]:
+    return {
+        "selected_strategy": chosen,
+        "strategy_return": bt.get("strategy_return"),
+        "buy_hold_return": bt.get("buy_hold_return"),
+        "summary": bt.get("summary"),
+        "strategies": [
+            {
+                "name": row.get("name"),
+                "return": row.get("return"),
+                "max_drawdown": row.get("max_drawdown"),
+                "trades": row.get("trades"),
+                "score": row.get("score"),
+            }
+            for row in bt.get("strategies") or []
+        ],
+        "buy_hold": {
+            "return": (bt.get("buy_hold") or {}).get("return", bt.get("buy_hold_return")),
+            "max_drawdown": (bt.get("buy_hold") or {}).get(
+                "max_drawdown", bt.get("buy_hold_max_drawdown")
+            ),
+            "trades": (bt.get("buy_hold") or {}).get("trades", bt.get("buy_hold_trades")),
+        },
+    }
+
+
+def _journal_payload(
+    payload: dict[str, Any],
+    sig: dict[str, Any] | None,
+    chosen: str,
+    reason: str,
+) -> dict[str, Any]:
+    body = dict(payload)
+    body.setdefault("strategy", chosen)
+    body.setdefault("selection_reason", reason)
+    if sig is not None:
+        if sig.get("news_score") is not None:
+            body.setdefault("news_score", sig.get("news_score"))
+        if sig.get("news_reason"):
+            body.setdefault("news_reason", sig.get("news_reason"))
+        body.setdefault("signal_reason", sig.get("reason"))
+    return body
+
+
+def _sized_qty(equity: float, price: float, mult: float, force_qty: float | None) -> float:
+    if force_qty is not None:
+        return force_qty
+    raw = (equity * MAX_POS * max(mult, 0.0)) / price if price else 0.0
+    if mult < 1:
+        return round(max(raw, 0.0001), 4)
+    return max(1.0, round(raw, 4))
 
 
 @app.get("/health")
@@ -98,128 +215,170 @@ def health():
 
 @app.post("/run")
 def run(body: RunRequest):
-    """Deterministic tool loop: market → backtest → signal → risk → order → journal."""
+    """Deterministic tool loop: market -> backtest -> select -> signal -> risk -> order -> journal."""
     steps: list[dict[str, Any]] = []
     symbol = body.symbol
 
     with _client() as client:
-        # 0. Kill switch early
         kill = tool_kill(client)
         steps.append({"tool": "get_kill_switch", "result": kill})
         if kill.get("killed") and body.goal in ("paper_cycle", "trade", "status_and_trade"):
-            # Still gather market + backtest for transparency, but skip order
             market = tool_get_market(client, symbol)
             steps.append({"tool": "get_market", "result": {"last": market.get("last")}})
             bt = tool_run_backtest(client, symbol)
+            chosen, selection_reason = pick_strategy(bt)
+            steps.append({"tool": "run_backtest", "result": _bt_brief(bt, chosen)})
             steps.append(
                 {
-                    "tool": "run_backtest",
-                    "result": {
-                        "strategy_return": bt.get("strategy_return"),
-                        "buy_hold_return": bt.get("buy_hold_return"),
-                        "summary": bt.get("summary"),
-                    },
+                    "tool": "select_strategy",
+                    "result": {"strategy": chosen, "reason": selection_reason},
                 }
             )
             j = tool_journal(
                 client,
-                {
-                    "title": "Blocked by kill switch",
-                    "symbol": symbol,
-                    "action": "hold",
-                    "allowed": False,
-                    "risk_reason": "kill_switch",
-                    "reason": "Human kill switch is ON; agent refused to trade.",
-                    "vs_buy_hold": bt.get("summary"),
-                    "tags": ["kill_switch", "blocked"],
-                },
+                _journal_payload(
+                    {
+                        "title": "Blocked by kill switch",
+                        "symbol": symbol,
+                        "action": "hold",
+                        "allowed": False,
+                        "risk_reason": "kill_switch",
+                        "reason": "Human kill switch is ON; agent refused to trade.",
+                        "vs_buy_hold": bt.get("summary"),
+                        "tags": ["kill_switch", "blocked", chosen],
+                    },
+                    None,
+                    chosen,
+                    selection_reason,
+                ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
             return {
                 "goal": body.goal,
                 "status": "blocked_kill_switch",
+                "selected_strategy": chosen,
+                "selection_reason": selection_reason,
                 "steps": steps,
                 "order": None,
             }
 
-        # 1. Market
         market = tool_get_market(client, symbol)
-        steps.append({"tool": "get_market", "result": {"last": market.get("last"), "news_n": len(market.get("news", []))}})
-
-        # 2. Backtest vs buy-and-hold
-        bt = tool_run_backtest(client, symbol)
         steps.append(
             {
-                "tool": "run_backtest",
-                "result": {
-                    "strategy_return": bt.get("strategy_return"),
-                    "buy_hold_return": bt.get("buy_hold_return"),
-                    "summary": bt.get("summary"),
-                },
+                "tool": "get_market",
+                "result": {"last": market.get("last"), "news_n": len(market.get("news", []))},
             }
         )
 
-        if body.goal == "backtest_only":
-            tool_journal(
-                client,
+        bt = tool_run_backtest(client, symbol)
+        chosen, selection_reason = pick_strategy(bt)
+        steps.append({"tool": "run_backtest", "result": _bt_brief(bt, chosen)})
+        steps.append(
+            {"tool": "select_strategy", "result": {"strategy": chosen, "reason": selection_reason}}
+        )
+        sel = tool_journal(
+            client,
+            _journal_payload(
                 {
-                    "title": "Backtest report",
+                    "title": f"Selected {chosen}",
                     "symbol": symbol,
-                    "action": "analyze",
-                    "reason": bt.get("summary"),
+                    "action": "compare strategies",
+                    "reason": selection_reason,
                     "vs_buy_hold": bt.get("summary"),
-                    "tags": ["backtest"],
+                    "tags": ["strategy_selection", chosen],
                 },
-            )
-            return {"goal": body.goal, "status": "ok", "backtest": bt, "steps": steps}
+                None,
+                chosen,
+                selection_reason,
+            ),
+        )
+        steps.append({"tool": "journal_selection", "result": {"id": sel.get("id")}})
 
-        # 3. Signal
-        sig = tool_signal(client, symbol)
+        if body.goal == "backtest_only":
+            return {
+                "goal": body.goal,
+                "status": "ok",
+                "backtest": bt,
+                "selected_strategy": chosen,
+                "selection_reason": selection_reason,
+                "steps": steps,
+            }
+
+        sig = tool_signal(client, symbol, chosen)
         steps.append({"tool": "get_signal", "result": sig})
 
         if sig.get("action") not in ("buy", "sell"):
+            title = (
+                "Hold - news vetoed the buy"
+                if sig.get("news_changed_decision") and sig.get("technical_action") == "buy"
+                else "Hold - no trade signal"
+            )
             j = tool_journal(
                 client,
-                {
-                    "title": "Hold — no crossover",
-                    "symbol": symbol,
-                    "action": "hold",
-                    "price": sig.get("price"),
-                    "reason": sig.get("reason", "hold"),
-                    "vs_buy_hold": bt.get("summary"),
-                    "tags": ["hold"],
-                },
+                _journal_payload(
+                    {
+                        "title": title,
+                        "symbol": symbol,
+                        "action": "hold",
+                        "price": sig.get("price"),
+                        "reason": sig.get("reason", "hold"),
+                        "vs_buy_hold": bt.get("summary"),
+                        "tags": ["hold", chosen],
+                    },
+                    sig,
+                    chosen,
+                    selection_reason,
+                ),
             )
-            steps.append({"tool": "journal", "result": {"id": j.get("id")}})
-            return {"goal": body.goal, "status": "hold", "signal": sig, "backtest_summary": bt.get("summary"), "steps": steps}
+            steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
+            return {
+                "goal": body.goal,
+                "status": "hold",
+                "signal": sig,
+                "selected_strategy": chosen,
+                "selection_reason": selection_reason,
+                "backtest_summary": bt.get("summary"),
+                "steps": steps,
+            }
 
         account = tool_account(client)
         steps.append({"tool": "get_account", "result": account})
         equity = float(account.get("equity") or account.get("cash") or 100000)
         price = float(sig["price"])
         action = sig["action"]
+        mult = 1.0 if sig.get("size_multiplier") is None else float(sig["size_multiplier"])
 
-        # Position sizing: max MAX_POS of equity
-        max_notional = equity * MAX_POS
-        qty = body.force_qty if body.force_qty is not None else max(1.0, round(max_notional / price, 4))
+        qty = _sized_qty(equity, price, mult, body.force_qty)
         if action == "sell":
             pos = (account.get("positions") or {}).get(symbol) or {}
             have = float(pos.get("qty") or 0)
             if have <= 0:
                 j = tool_journal(
                     client,
-                    {
-                        "title": "Sell signal but flat",
-                        "symbol": symbol,
-                        "action": "hold",
-                        "reason": "Sell signal with no open position",
-                        "signal_reason": sig.get("reason"),
-                        "vs_buy_hold": bt.get("summary"),
-                        "tags": ["hold"],
-                    },
+                    _journal_payload(
+                        {
+                            "title": "Sell signal but flat",
+                            "symbol": symbol,
+                            "action": "hold",
+                            "reason": "Sell signal with no open position",
+                            "signal_reason": sig.get("reason"),
+                            "vs_buy_hold": bt.get("summary"),
+                            "tags": ["hold", chosen],
+                        },
+                        sig,
+                        chosen,
+                        selection_reason,
+                    ),
                 )
                 steps.append({"tool": "journal", "result": {"id": j.get("id")}})
-                return {"goal": body.goal, "status": "hold_flat", "signal": sig, "steps": steps}
+                return {
+                    "goal": body.goal,
+                    "status": "hold_flat",
+                    "signal": sig,
+                    "selected_strategy": chosen,
+                    "selection_reason": selection_reason,
+                    "steps": steps,
+                }
             qty = min(qty, have)
 
         stop_loss = None
@@ -249,21 +408,26 @@ def run(body: RunRequest):
         if not risk.get("allowed"):
             j = tool_journal(
                 client,
-                {
-                    "title": f"Blocked: {risk.get('reason')}",
-                    "symbol": symbol,
-                    "side": action,
-                    "action": action,
-                    "qty": qty,
-                    "price": price,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "allowed": False,
-                    "risk_reason": risk.get("detail") or risk.get("reason"),
-                    "signal_reason": sig.get("reason"),
-                    "vs_buy_hold": bt.get("summary"),
-                    "tags": ["blocked", str(risk.get("reason"))],
-                },
+                _journal_payload(
+                    {
+                        "title": f"Blocked: {risk.get('reason')}",
+                        "symbol": symbol,
+                        "side": action,
+                        "action": action,
+                        "qty": qty,
+                        "price": price,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "allowed": False,
+                        "risk_reason": risk.get("detail") or risk.get("reason"),
+                        "signal_reason": sig.get("reason"),
+                        "vs_buy_hold": bt.get("summary"),
+                        "tags": ["blocked", str(risk.get("reason")), chosen],
+                    },
+                    sig,
+                    chosen,
+                    selection_reason,
+                ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
             return {
@@ -271,6 +435,8 @@ def run(body: RunRequest):
                 "status": "risk_denied",
                 "risk": risk,
                 "signal": sig,
+                "selected_strategy": chosen,
+                "selection_reason": selection_reason,
                 "steps": steps,
                 "order": None,
             }
@@ -278,25 +444,33 @@ def run(body: RunRequest):
         if body.dry_run:
             j = tool_journal(
                 client,
-                {
-                    "title": f"Dry-run {action}",
-                    "symbol": symbol,
-                    "side": action,
-                    "action": action,
-                    "qty": qty,
-                    "price": price,
-                    "allowed": True,
-                    "risk_reason": "ok (dry_run)",
-                    "signal_reason": sig.get("reason"),
-                    "vs_buy_hold": bt.get("summary"),
-                    "tags": ["dry_run"],
-                },
+                _journal_payload(
+                    {
+                        "title": f"Dry-run {action}",
+                        "symbol": symbol,
+                        "side": action,
+                        "action": action,
+                        "qty": qty,
+                        "price": price,
+                        "allowed": True,
+                        "risk_reason": "ok (dry_run)",
+                        "signal_reason": sig.get("reason"),
+                        "vs_buy_hold": bt.get("summary"),
+                        "tags": ["dry_run", chosen],
+                    },
+                    sig,
+                    chosen,
+                    selection_reason,
+                ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id")}})
             return {
                 "goal": body.goal,
                 "status": "dry_run",
                 "would_order": risk_payload,
+                "signal": sig,
+                "selected_strategy": chosen,
+                "selection_reason": selection_reason,
                 "steps": steps,
             }
 
@@ -318,23 +492,28 @@ def run(body: RunRequest):
 
         j = tool_journal(
             client,
-            {
-                "title": f"Paper {action} filled",
-                "symbol": symbol,
-                "side": action,
-                "action": action,
-                "qty": qty,
-                "price": price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "allowed": True,
-                "risk_reason": "ok",
-                "signal_reason": sig.get("reason"),
-                "reason": sig.get("reason"),
-                "vs_buy_hold": bt.get("summary"),
-                "tags": ["fill", "paper"],
-                "extra": {"fill_id": (fill.get("fill") or {}).get("fill_id")},
-            },
+            _journal_payload(
+                {
+                    "title": f"Paper {action} filled",
+                    "symbol": symbol,
+                    "side": action,
+                    "action": action,
+                    "qty": qty,
+                    "price": price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "allowed": True,
+                    "risk_reason": "ok",
+                    "signal_reason": sig.get("reason"),
+                    "reason": sig.get("reason"),
+                    "vs_buy_hold": bt.get("summary"),
+                    "tags": ["fill", "paper", chosen],
+                    "extra": {"fill_id": (fill.get("fill") or {}).get("fill_id")},
+                },
+                sig,
+                chosen,
+                selection_reason,
+            ),
         )
         steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
 
@@ -344,6 +523,8 @@ def run(body: RunRequest):
             "signal": sig,
             "risk": risk,
             "order": fill,
+            "selected_strategy": chosen,
+            "selection_reason": selection_reason,
             "backtest_summary": bt.get("summary"),
             "steps": steps,
             "tokens_used": _tokens_used,

@@ -24,6 +24,12 @@
     .status-off { color:var(--ok); font-weight:700; }
     .muted { color:var(--muted); font-size:.8rem; }
     ul { margin:.25rem 0 0; padding-left:1.1rem; font-size:.85rem; }
+    table { width:100%; border-collapse:collapse; font-size:.85rem; }
+    th, td { text-align:left; padding:.4rem .45rem; border-bottom:1px solid #243044; }
+    th { color:var(--muted); font-weight:600; }
+    tr.selected td { background:#16324a; }
+    tr.benchmark td { color:var(--muted); }
+    .tag { display:inline-block; margin-left:.35rem; font-size:.7rem; padding:.1rem .35rem; border-radius:999px; background:#243044; }
   </style>
 </head>
 <body>
@@ -55,9 +61,12 @@
       <h2>Account (paper)</h2>
       <pre id="account">…</pre>
     </section>
-    <section class="card">
+    <section class="card" style="grid-column:1/-1">
       <h2>Backtest vs buy-and-hold</h2>
-      <pre id="backtest">…</pre>
+      <p id="btLead" class="muted">Loading comparison...</p>
+      <div id="backtest"></div>
+      <p id="liveSignal" class="muted"></p>
+      <p id="newsExample" class="muted"></p>
     </section>
     <section class="card" style="grid-column:1/-1">
       <h2>Journal (latest)</h2>
@@ -76,6 +85,34 @@
       journal: 'http://127.0.0.1:8006',
       strategy: 'http://127.0.0.1:8002',
     };
+    function esc(s){
+      return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function pct(x){
+      const n = Number(x);
+      return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : 'n/a';
+    }
+    function renderBacktest(bt){
+      const lead = document.getElementById('btLead');
+      lead.textContent = bt.selection_reason || bt.summary || 'Backtest ready.';
+      const rows = (bt.strategies || []).map(s => ({...s, role: s.name === bt.selected_strategy ? 'selected' : 'candidate'}));
+      if (bt.buy_hold) rows.push({...bt.buy_hold, role: 'benchmark'});
+      const body = rows.map(s => {
+        const cls = s.role === 'selected' ? 'selected' : (s.role === 'benchmark' ? 'benchmark' : '');
+        const label = s.role === 'selected' ? ' <span class="tag">selected</span>' : (s.role === 'benchmark' ? ' <span class="tag">benchmark</span>' : '');
+        return `<tr class="${cls}"><td>${esc(s.name)}${label}</td><td>${pct(s.return)}</td><td>${pct(s.max_drawdown)}</td><td>${esc(s.trades)}</td><td>${s.score == null ? 'n/a' : Number(s.score).toFixed(4)}</td></tr>`;
+      }).join('');
+      document.getElementById('backtest').innerHTML =
+        `<table><thead><tr><th>Strategy</th><th>Return</th><th>Max drawdown</th><th>Trades</th><th>Score</th></tr></thead><tbody>${body}</tbody></table>` +
+        `<p class="muted">Score = return - ${esc(bt.drawdown_penalty)} * max drawdown. Price backtests only; news adjusts the live signal. ${esc(bt.metric_note || '')}</p>`;
+      const ex = bt.news_decision_example;
+      const box = document.getElementById('newsExample');
+      if (!ex) {
+        box.textContent = 'No seed bar where news changed a buy.';
+        return;
+      }
+      box.innerHTML = `<strong>News changed a decision</strong> on ${esc(ex.date)} (${esc(ex.strategy)}): technical ${esc(ex.technical_action)} became ${esc(ex.action)} (news score ${Number(ex.news_score).toFixed(2)}). ${esc(ex.news_reason)}`;
+    }
     async function jget(url){ const r=await fetch(url); return r.json(); }
     async function jpost(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.json(); }
     async function refresh(){
@@ -90,17 +127,21 @@
       try { document.getElementById('fills').textContent = JSON.stringify(await jget(U.broker + '/fills?limit=10'), null, 2); } catch(e){}
       try {
         const bt = await jpost(U.strategy + '/backtest', {symbol:'SYNTH'});
-        document.getElementById('backtest').textContent = bt.summary + '\n' + JSON.stringify({
-          strategy_return: bt.strategy_return,
-          buy_hold_return: bt.buy_hold_return,
-          outperformance: bt.outperformance,
-          trades: bt.trades
-        }, null, 2);
-      } catch(e){ document.getElementById('backtest').textContent = String(e); }
+        renderBacktest(bt);
+        const strat = bt.selected_strategy || 'sma_crossover';
+        const sig = await jpost(U.strategy + '/signal', {symbol:'SYNTH', strategy: strat});
+        const live = document.getElementById('liveSignal');
+        const changed = sig.technical_action && sig.technical_action !== sig.action
+          ? `Technical ${sig.technical_action} became ${sig.action}. `
+          : '';
+        live.textContent = `Live ${sig.strategy || strat} on ${sig.date || 'n/a'}: ${sig.action}. ${changed}News score ${Number(sig.news_score).toFixed(2)}. ${sig.news_reason || ''}`;
+      } catch(e){
+        document.getElementById('btLead').textContent = String(e);
+      }
       try {
         const ents = await jget(U.journal + '/entries?limit=8');
         document.getElementById('journal').innerHTML = (ents.entries||[]).slice().reverse().map(e =>
-          `<li><strong>${e.title}</strong> — ${e.body}</li>`).join('') || '<li class="muted">No entries</li>';
+          `<li><strong>${esc(e.title)}</strong> - ${esc(e.body)}</li>`).join('') || '<li class="muted">No entries</li>';
       } catch(e){}
     }
     async function setKill(killed){

@@ -55,6 +55,13 @@ def _append(row: dict) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def _sentence(text: str) -> str:
+    text = str(text).strip()
+    if not text:
+        return text
+    return text if text[-1] in ".!?" else text + "."
+
+
 def _template_body(payload: dict) -> str:
     action = payload.get("action") or payload.get("side") or "decision"
     symbol = payload.get("symbol", "SYNTH")
@@ -68,17 +75,30 @@ def _template_body(payload: dict) -> str:
     ]
     if qty is not None and price is not None:
         parts.append(f"Size {qty} at about {price}.")
-    parts.append(f"Why: {reason}.")
+    parts.append(f"Why: {_sentence(reason)}")
     if allowed is False:
-        parts.append(f"Risk guard blocked it: {risk}.")
+        parts.append(f"Risk guard blocked it: {_sentence(risk)}")
     elif allowed is True:
         parts.append(f"Risk guard allowed it ({risk}).")
     if payload.get("stop_loss") is not None:
         parts.append(f"Stop loss at {payload['stop_loss']}.")
     if payload.get("take_profit") is not None:
         parts.append(f"Take profit at {payload['take_profit']}.")
+    if payload.get("strategy"):
+        parts.append(f"Strategy in use: {payload['strategy']}.")
+    selection = payload.get("selection_reason")
+    if selection and selection != reason:
+        parts.append(f"Strategy pick: {_sentence(selection)}")
+    if payload.get("news_score") is not None or payload.get("news_reason"):
+        if payload.get("news_score") is None:
+            parts.append(_sentence(f"News: {payload.get('news_reason')}"))
+        else:
+            news_line = f"News score {float(payload['news_score']):.2f}."
+            if payload.get("news_reason"):
+                news_line = f"{news_line} {payload['news_reason']}"
+            parts.append(_sentence(news_line))
     if payload.get("vs_buy_hold"):
-        parts.append(f"Backtest note: {payload['vs_buy_hold']}.")
+        parts.append(f"Backtest note: {_sentence(payload['vs_buy_hold'])}")
     return " ".join(parts)
 
 
@@ -104,6 +124,10 @@ class TradeJournal(BaseModel):
     risk_reason: str | None = None
     allowed: bool | None = None
     vs_buy_hold: str | None = None
+    strategy: str | None = None
+    selection_reason: str | None = None
+    news_score: float | None = None
+    news_reason: str | None = None
     tags: list[str] = Field(default_factory=list)
     extra: dict = Field(default_factory=dict)
 
@@ -156,6 +180,10 @@ def add_trade(body: TradeJournal):
         "risk_reason": body.risk_reason,
         "allowed": body.allowed,
         "vs_buy_hold": body.vs_buy_hold,
+        "strategy": body.strategy,
+        "selection_reason": body.selection_reason,
+        "news_score": body.news_score,
+        "news_reason": body.news_reason,
         **body.extra,
     }
     title = body.title or f"{structured['action']} {body.symbol}".strip()
