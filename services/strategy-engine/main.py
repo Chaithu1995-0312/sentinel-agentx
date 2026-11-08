@@ -291,6 +291,7 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
     trades = 0
     equity: list[float] = []
     trade_dates: list[str] = []
+    trade_events: list[dict] = []
     for i, px in enumerate(closes):
         act = actions[i]
         if position == 0 and act == "buy":
@@ -299,12 +300,14 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
             position = 1
             trades += 1
             trade_dates.append(dates[i])
+            trade_events.append({"date": dates[i], "side": "buy"})
         elif position == 1 and act == "sell":
             cash = qty * px
             qty = 0.0
             position = 0
             trades += 1
             trade_dates.append(dates[i])
+            trade_events.append({"date": dates[i], "side": "sell"})
         equity.append(cash + qty * px)
     final = equity[-1] if equity else starting_cash
     ret = (final / starting_cash) - 1.0 if starting_cash else 0.0
@@ -315,6 +318,7 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
         "final_equity": final,
         "equity": equity,
         "trade_dates": trade_dates,
+        "trade_events": trade_events,
     }
 
 
@@ -840,6 +844,24 @@ def backtest(body: BacktestRequest):
     last_day = dates[-1]
     current = next((reg for reg in regimes if reg["start"] <= last_day <= reg["end"]), None)
     regime_strategy = (current or {}).get("selected_strategy") or best["name"]
+    veto_reason = (example or {}).get("news_reason") or ""
+    scored_news = []
+    for item in news:
+        headline = item.get("headline") or ""
+        scored = score_headline(headline)
+        scored_news.append(
+            {
+                "date": item.get("date"),
+                "headline": headline,
+                "source": item.get("source"),
+                "regime": item.get("regime"),
+                "score": scored["score"],
+                "veto": bool(headline)
+                and headline in veto_reason
+                and str(item.get("date") or "") in veto_reason
+                and scored["score"] <= NEWS_VETO_SCORE,
+            }
+        )
     summary = (
         f"Selected {best['name']} score {best['score']:.4f} "
         f"(return {best['return'] * 100:.2f}%, max drawdown {best['max_drawdown'] * 100:.2f}%, "
@@ -870,6 +892,8 @@ def backtest(body: BacktestRequest):
         "strategies": rows,
         "buy_hold": bh,
         "equity_curve": curves[best["name"]],
+        "trade_markers": sims[best["name"]].get("trade_events") or [],
+        "scored_news": scored_news,
         "buy_hold_curve": [
             {"date": d, "equity": round(e, 2)} for d, e in zip(dates, bh_sim["equity"])
         ],

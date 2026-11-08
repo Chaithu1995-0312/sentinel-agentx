@@ -3,180 +3,741 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sentinel — Paper Control</title>
+  <title>Sentinel — paper-trading agent</title>
+  <script src="/static/chart.umd.min.js"></script>
   <style>
-    :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#9aa7b8; --ok:#3dd68c; --bad:#ff6b6b; --accent:#5b9cff; }
+    :root {
+      --bg: #070b14;
+      --bg-2: #0e1524;
+      --card: #121a2b;
+      --line: #26344c;
+      --text: #e7eef9;
+      --muted: #93a0b8;
+      --red: #ff3b30;
+      --red-dim: #3a1518;
+      --green: #3dd68c;
+      --amber: #f5b942;
+      --blue: #7eb0ff;
+      --shadow: 0 10px 30px rgba(0, 0, 0, .28);
+    }
     * { box-sizing: border-box; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--text); }
-    header { padding:1rem 1.5rem; border-bottom:1px solid #243044; display:flex; justify-content:space-between; align-items:center; }
-    h1 { font-size:1.1rem; margin:0; }
-    .badge { font-size:.75rem; padding:.25rem .5rem; border-radius:999px; background:#243044; color:var(--muted); }
-    main { display:grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap:1rem; padding:1rem 1.5rem 2rem; }
-    .card { background:var(--card); border:1px solid #243044; border-radius:12px; padding:1rem; }
-    .card h2 { margin:0 0 .75rem; font-size:.95rem; color:var(--muted); font-weight:600; }
-    button { cursor:pointer; border:0; border-radius:8px; padding:.55rem .9rem; font-weight:600; }
-    .btn-kill { background:var(--bad); color:#fff; }
-    .btn-clear { background:var(--ok); color:#062016; }
-    .btn-run { background:var(--accent); color:#fff; }
-    .row { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.75rem; }
-    pre { background:#0b1017; padding:.75rem; border-radius:8px; overflow:auto; font-size:.75rem; max-height:220px; }
-    .status-on { color:var(--bad); font-weight:700; }
-    .status-off { color:var(--ok); font-weight:700; }
-    .muted { color:var(--muted); font-size:.8rem; }
-    ul { margin:.25rem 0 0; padding-left:1.1rem; font-size:.85rem; }
-    table { width:100%; border-collapse:collapse; font-size:.85rem; }
-    th, td { text-align:left; padding:.4rem .45rem; border-bottom:1px solid #243044; }
-    th { color:var(--muted); font-weight:600; }
-    tr.selected td { background:#16324a; }
-    tr.benchmark td { color:var(--muted); }
-    .tag { display:inline-block; margin-left:.35rem; font-size:.7rem; padding:.1rem .35rem; border-radius:999px; background:#243044; }
+    html, body { margin: 0; }
+    body {
+      font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(1200px 500px at 10% -10%, #152038 0%, var(--bg) 55%);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .page { max-width: 1560px; margin: 0 auto; padding: 16px 20px 48px; }
+    .top {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.1fr) minmax(320px, 1.4fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 14px 16px;
+      background: rgba(18, 26, 43, .92);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      position: sticky;
+      top: 8px;
+      z-index: 5;
+    }
+    .brand-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    h1 { font-size: 1.25rem; line-height: 1.2; margin: 0; letter-spacing: -.02em; }
+    .sub { margin: 6px 0 0; color: var(--muted); font-size: .82rem; }
+    .paper {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--amber);
+      color: #1d1402;
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .08em;
+    }
+    .services { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .svc {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #0c1322;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .72rem;
+      font-weight: 650;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #5c6b84; }
+    .svc.ok { color: var(--text); }
+    .svc.ok .dot { background: var(--green); box-shadow: 0 0 0 3px rgba(61, 214, 140, .15); }
+    .svc.bad { color: #ffb4b0; border-color: #6a3034; }
+    .svc.bad .dot { background: var(--red); }
+    .kill {
+      min-width: 210px;
+      min-height: 64px;
+      padding: 10px 18px;
+      border: 0;
+      border-radius: 14px;
+      background: var(--red);
+      color: white;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      box-shadow: 0 8px 20px rgba(255, 59, 48, .35);
+    }
+    .kill small { display: block; margin-top: 2px; font-size: .68rem; font-weight: 700; letter-spacing: .04em; opacity: .9; text-transform: none; }
+    .kill.on {
+      background: var(--red-dim);
+      color: #ffd0cd;
+      box-shadow: inset 0 0 0 2px var(--red);
+    }
+    .kill:disabled { opacity: .55; cursor: not-allowed; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px 16px;
+      box-shadow: var(--shadow);
+    }
+    .card h2 { margin: 0 0 10px; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+    .kpi .value { font-size: 1.55rem; font-weight: 720; letter-spacing: -.03em; margin: 2px 0; }
+    .kpi .hint { color: var(--muted); font-size: .8rem; min-height: 1.1em; }
+    .meter { height: 8px; margin-top: 10px; background: #0c1322; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+    .meter > span { display: block; height: 100%; width: 0; background: var(--red); }
+    .split { display: grid; grid-template-columns: 1.45fr .85fr; gap: 12px; margin-top: 12px; }
+    .split.bottom { grid-template-columns: 1.25fr .75fr; }
+    .chart-wrap { position: relative; height: 300px; }
+    .chart-wrap canvas { width: 100% !important; height: 100% !important; }
+    .panel-note { color: var(--muted); font-size: .8rem; margin: 0 0 8px; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+    .tab {
+      border: 1px solid var(--line);
+      background: #0c1322;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: .8rem;
+      font-weight: 700;
+    }
+    .tab[aria-selected="true"] { background: #1c3f73; color: white; border-color: #3d6cb5; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.selected td { background: #173156; }
+    tr.benchmark td { color: var(--muted); }
+    .pill {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #1c3f73;
+      color: #d6e6ff;
+      font-size: .68rem;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      vertical-align: 1px;
+    }
+    .tip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-left: 4px;
+      border-radius: 50%;
+      background: #24344f;
+      color: var(--text);
+      font-size: .68rem;
+      cursor: help;
+      position: relative;
+    }
+    .tip:hover::after, .tip:focus::after {
+      content: attr(data-tip);
+      position: absolute;
+      right: 0;
+      top: 22px;
+      width: 260px;
+      padding: 8px 10px;
+      background: #0c1322;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: .75rem;
+      letter-spacing: 0;
+      text-transform: none;
+      font-weight: 500;
+      z-index: 4;
+      box-shadow: var(--shadow);
+    }
+    .news-list, .journal { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow: auto; }
+    .news-item, .entry {
+      background: #0c1322;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .news-item.veto { border-color: #8a3034; }
+    .news-top, .entry-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+    .chip { font-variant-numeric: tabular-nums; font-weight: 750; font-size: .75rem; padding: 2px 8px; border-radius: 999px; }
+    .chip.pos { background: rgba(61, 214, 140, .16); color: var(--green); }
+    .chip.neg { background: rgba(255, 59, 48, .16); color: #ff8d87; }
+    .chip.flat { background: #243044; color: var(--muted); }
+    .flag { margin-left: 6px; font-size: .68rem; font-weight: 800; letter-spacing: .06em; color: #ffb4b0; }
+    .headline { margin: 6px 0 0; font-size: .88rem; }
+    .meta { color: var(--muted); font-size: .75rem; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag { font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; background: #243044; color: var(--muted); }
+    .tag.buy { background: rgba(61, 214, 140, .16); color: var(--green); }
+    .tag.sell, .tag.kill { background: rgba(255, 59, 48, .16); color: #ff8d87; }
+    .tag.hold { background: #243044; color: #c5d0e2; }
+    .tag.veto { background: rgba(245, 185, 66, .16); color: var(--amber); }
+    .entry p { margin: 8px 0 0; font-size: .88rem; }
+    dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; font-size: .88rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    .log { list-style: none; margin: 10px 0 0; padding: 0; }
+    .log li { font-size: .78rem; color: var(--muted); padding: 4px 0; border-top: 1px solid var(--line); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .ghost, .primary {
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+    }
+    .ghost { background: #0c1322; color: var(--text); }
+    .primary { background: #1c3f73; color: white; border-color: #3d6cb5; }
+    .empty { color: var(--muted); font-size: .88rem; padding: 8px 0; }
+    .err { color: #ffb4b0; font-size: .82rem; }
+    @media (max-width: 1100px) {
+      .top, .kpis, .split, .split.bottom { grid-template-columns: 1fr 1fr; }
+      .top { grid-template-columns: 1fr; }
+      .services { justify-content: flex-start; }
+    }
+    @media (max-width: 720px) {
+      .kpis, .split, .split.bottom { grid-template-columns: 1fr; }
+      .page { padding: 10px; }
+      h1 { font-size: 1.05rem; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Sentinel · Paper Control <span class="badge">PS-02 · no live money</span></h1>
-    <span id="clock" class="muted"></span>
-  </header>
-  <main>
-    <section class="card">
-      <h2>Kill switch (human only)</h2>
-      <p>State: <span id="killState" class="status-on">…</span></p>
-      <p class="muted">Agent cannot clear this. Fail-closed when ON.</p>
-      <div class="row">
-        <button class="btn-kill" onclick="setKill(true)">Engage kill</button>
-        <button class="btn-clear" onclick="setKill(false)">Clear kill (human)</button>
-        <button onclick="refresh()">Refresh</button>
+  <div class="page">
+    <header class="top">
+      <div class="brand">
+        <div class="brand-row">
+          <h1>Sentinel — paper-trading agent</h1>
+          <span class="paper">PAPER ONLY</span>
+        </div>
+        <p class="sub" id="clock">Mock prices. No live orders.</p>
       </div>
+      <div id="services" class="services" aria-label="Service status"></div>
+      <button id="killBtn" class="kill" type="button" disabled>
+        <span id="killLabel">Kill switch</span>
+        <small id="killHint">checking risk-guard</small>
+      </button>
+    </header>
+
+    <section class="kpis" aria-label="Key figures">
+      <article class="card kpi">
+        <h2>Equity</h2>
+        <div class="value" id="kpiEquity">n/a</div>
+        <div class="hint" id="kpiCash">Paper cash unavailable</div>
+      </article>
+      <article class="card kpi">
+        <h2>Today's P&amp;L</h2>
+        <div class="value" id="kpiPnl">n/a</div>
+        <div class="hint" id="kpiPnlHint">vs daily loss limit</div>
+        <div class="meter" aria-hidden="true"><span id="pnlBar"></span></div>
+      </article>
+      <article class="card kpi">
+        <h2>Open positions</h2>
+        <div class="value" id="kpiPos">n/a</div>
+        <div class="hint" id="kpiPosHint">No paper position</div>
+      </article>
+      <article class="card kpi">
+        <h2>Strategy</h2>
+        <div class="value" id="kpiStrat">n/a</div>
+        <div class="hint" id="kpiRegime">Regime unavailable</div>
+      </article>
     </section>
-    <section class="card">
-      <h2>Agent tool loop</h2>
-      <p class="muted">market → backtest → signal → risk → paper order → journal</p>
-      <div class="row">
-        <button class="btn-run" onclick="runAgent()">Run paper cycle</button>
-        <button onclick="runAgent(true)">Dry run</button>
-      </div>
-      <pre id="runOut">No run yet.</pre>
+
+    <section class="split">
+      <article class="card">
+        <h2>Equity curve</h2>
+        <p class="panel-note" id="chartNote">Agent versus buy-and-hold. The crash window is shaded. Dots are paper-strategy trades.</p>
+        <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+        <p class="empty" id="chartEmpty" hidden>Equity curve unavailable.</p>
+      </article>
+      <article class="card">
+        <h2>News</h2>
+        <p class="panel-note">Lexicon score. Green is positive, red is negative. VETO marks a headline that blocked a buy.</p>
+        <div id="news" class="news-list"><p class="empty">Loading headlines...</p></div>
+      </article>
     </section>
-    <section class="card">
-      <h2>Account (paper)</h2>
-      <pre id="account">…</pre>
+
+    <section class="card" style="margin-top:12px">
+      <h2>Strategy comparison</h2>
+      <div class="tabs" id="regimeTabs" role="tablist"></div>
+      <div id="strategyTable"><p class="empty">Loading backtest...</p></div>
+      <p class="panel-note" id="formulaNote">Score = return - 0.5 x max drawdown. Higher wins. Buy-and-hold is the benchmark and is not selected.</p>
     </section>
-    <section class="card" style="grid-column:1/-1">
-      <h2>Backtest vs buy-and-hold</h2>
-      <p id="btLead" class="muted">Loading comparison...</p>
-      <div id="backtest"></div>
-      <p id="liveSignal" class="muted"></p>
-      <p id="newsExample" class="muted"></p>
+
+    <section class="split bottom">
+      <article class="card">
+        <h2>Journal</h2>
+        <div id="journal" class="journal"><p class="empty">Loading journal...</p></div>
+      </article>
+      <article class="card">
+        <h2>Risk</h2>
+        <p class="err" id="riskErr" hidden></p>
+        <dl id="riskList">
+          <dt>Status</dt><dd>Loading</dd>
+        </dl>
+        <h2 style="margin-top:14px">Kill-switch log</h2>
+        <ul class="log" id="killLog"><li>No changes this session.</li></ul>
+        <div class="actions">
+          <button class="primary" type="button" id="runBtn">Run paper cycle</button>
+          <button class="ghost" type="button" id="dryBtn">Dry run</button>
+        </div>
+        <p class="panel-note" id="runOut">Agent idle.</p>
+      </article>
     </section>
-    <section class="card" style="grid-column:1/-1">
-      <h2>Journal (latest)</h2>
-      <ul id="journal"></ul>
-    </section>
-    <section class="card" style="grid-column:1/-1">
-      <h2>Recent fills</h2>
-      <pre id="fills">…</pre>
-    </section>
-  </main>
+  </div>
   <script>
     const U = {
+      market: 'http://127.0.0.1:8001',
+      strategy: 'http://127.0.0.1:8002',
       risk: 'http://127.0.0.1:8003',
       broker: 'http://127.0.0.1:8004',
       agent: 'http://127.0.0.1:8005',
       journal: 'http://127.0.0.1:8006',
-      strategy: 'http://127.0.0.1:8002',
+      dashboard: 'http://127.0.0.1:8010',
     };
-    function esc(s){
+    const SERVICES = [
+      ['Market', U.market],
+      ['Strategy', U.strategy],
+      ['Risk', U.risk],
+      ['Broker', U.broker],
+      ['Agent', U.agent],
+      ['Journal', U.journal],
+      ['UI', U.dashboard],
+    ];
+    const SCORE_TIP = 'score = return - 0.5 x max drawdown. Higher wins. Ties break on return, then fewer trades. Buy-and-hold is the benchmark and is not selected.';
+    let killed = null;
+    let chart = null;
+    let backtest = null;
+    let activeTab = 'overall';
+    let refreshing = false;
+
+    function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
-    function pct(x){
+    function money(n) {
+      const v = Number(n);
+      if (!Number.isFinite(v)) return 'n/a';
+      const sign = v < 0 ? '-' : '';
+      return sign + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function pct(x) {
       const n = Number(x);
       return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : 'n/a';
     }
-    function renderBacktest(bt){
-      const lead = document.getElementById('btLead');
-      const mock = bt.mock_label ? bt.mock_label + ' ' : '';
-      lead.textContent = mock + (bt.selection_reason || bt.summary || 'Backtest ready.');
-      const rows = (bt.strategies || []).map(s => ({...s, role: s.name === bt.selected_strategy ? 'selected' : 'candidate'}));
-      if (bt.buy_hold) rows.push({...bt.buy_hold, role: 'benchmark'});
-      const body = rows.map(s => {
-        const cls = s.role === 'selected' ? 'selected' : (s.role === 'benchmark' ? 'benchmark' : '');
-        const label = s.role === 'selected' ? ' <span class="tag">selected</span>' : (s.role === 'benchmark' ? ' <span class="tag">benchmark</span>' : '');
-        return `<tr class="${cls}"><td>${esc(s.name)}${label}</td><td>${pct(s.return)}</td><td>${pct(s.max_drawdown)}</td><td>${esc(s.trades)}</td><td>${s.score == null ? 'n/a' : Number(s.score).toFixed(4)}</td></tr>`;
+    async function getJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(r.status + ' ' + url);
+      return r.json();
+    }
+    async function postJson(url, body) {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error(r.status + ' ' + url);
+      return r.json();
+    }
+
+    function renderServices(states) {
+      document.getElementById('services').innerHTML = SERVICES.map(([name], i) => {
+        const ok = states[i];
+        return `<span class="svc ${ok ? 'ok' : 'bad'}"><span class="dot"></span>${esc(name)}</span>`;
       }).join('');
-      const regimes = (bt.regimes || []).map(reg => {
-        const rrows = (reg.strategies || []).map(s => ({...s, role: s.name === reg.selected_strategy ? 'selected' : 'candidate'}));
-        if (reg.buy_hold) rrows.push({...reg.buy_hold, role: 'benchmark'});
-        const rbody = rrows.map(s => {
-          const cls = s.role === 'selected' ? 'selected' : (s.role === 'benchmark' ? 'benchmark' : '');
-          const label = s.role === 'selected' ? ' <span class="tag">regime pick</span>' : (s.role === 'benchmark' ? ' <span class="tag">benchmark</span>' : '');
-          return `<tr class="${cls}"><td>${esc(s.name)}${label}</td><td>${pct(s.return)}</td><td>${pct(s.max_drawdown)}</td><td>${esc(s.trades)}</td><td>${s.score == null ? 'n/a' : Number(s.score).toFixed(4)}</td></tr>`;
-        }).join('');
-        return `<h3 style="margin:1rem 0 .4rem;font-size:.9rem">${esc(reg.name)} <span class="muted">${esc(reg.start)} to ${esc(reg.end)}</span></h3>` +
-          `<table><thead><tr><th>Strategy</th><th>Return</th><th>Max drawdown</th><th>Trades</th><th>Score</th></tr></thead><tbody>${rbody}</tbody></table>`;
-      }).join('');
-      const crash = (bt.regimes || []).find(reg => reg.name === 'crash');
-      const crashRow = crash && (crash.strategies || []).find(s => s.name === bt.selected_strategy);
-      const crashNote = crash && crashRow && crash.buy_hold
-        ? `During the crash, ${bt.selected_strategy} max drawdown was ${pct(crashRow.max_drawdown)} and buy-and-hold was ${pct(crash.buy_hold.max_drawdown)}.`
-        : '';
-      document.getElementById('backtest').innerHTML =
-        `<table><thead><tr><th>Strategy</th><th>Return</th><th>Max drawdown</th><th>Trades</th><th>Score</th></tr></thead><tbody>${body}</tbody></table>` +
-        `<p class="muted">Score = return - ${esc(bt.drawdown_penalty)} * max drawdown. Full-sample pick: ${esc(bt.selected_strategy)}. Current regime ${esc(bt.current_regime || 'n/a')} re-selects ${esc(bt.regime_strategy || 'n/a')} for the live signal. ${esc(crashNote)} Price backtests only; news adjusts the live signal.</p>` +
-        regimes;
-      const ex = bt.news_decision_example;
-      const box = document.getElementById('newsExample');
-      if (!ex) {
-        box.textContent = 'No seed bar where news changed a buy.';
+    }
+
+    function noteKill(isKilled, source) {
+      const key = 'sentinel.killLog';
+      let log = [];
+      try { log = JSON.parse(sessionStorage.getItem(key) || '[]'); } catch (e) { log = []; }
+      const last = log[0];
+      if (source === 'observe' && last && last.killed === isKilled) {
+        renderKillLog(log);
         return;
       }
-      box.innerHTML = `<strong>News changed a decision</strong> on ${esc(ex.date)} (${esc(ex.strategy)}): technical ${esc(ex.technical_action)} became ${esc(ex.action)} (news score ${Number(ex.news_score).toFixed(2)}). ${esc(ex.news_reason)}`;
+      log.unshift({ ts: new Date().toISOString(), killed: !!isKilled, source });
+      log = log.slice(0, 8);
+      sessionStorage.setItem(key, JSON.stringify(log));
+      renderKillLog(log);
     }
-    async function jget(url){ const r=await fetch(url); return r.json(); }
-    async function jpost(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.json(); }
-    async function refresh(){
-      document.getElementById('clock').textContent = new Date().toLocaleString();
-      try {
-        const ks = await jget(U.risk + '/kill-switch');
-        const el = document.getElementById('killState');
-        el.textContent = ks.killed ? 'ON — trading blocked' : 'OFF — trading allowed';
-        el.className = ks.killed ? 'status-on' : 'status-off';
-      } catch(e){ document.getElementById('killState').textContent = 'risk-guard offline'; }
-      try { document.getElementById('account').textContent = JSON.stringify(await jget(U.broker + '/account'), null, 2); } catch(e){ document.getElementById('account').textContent = String(e); }
-      try { document.getElementById('fills').textContent = JSON.stringify(await jget(U.broker + '/fills?limit=10'), null, 2); } catch(e){}
-      try {
-        const bt = await jpost(U.strategy + '/backtest', {symbol:'SYNTH'});
-        renderBacktest(bt);
-        const strat = bt.regime_strategy || bt.selected_strategy || 'sma_crossover';
-        const sig = await jpost(U.strategy + '/signal', {symbol:'SYNTH', strategy: strat});
-        const live = document.getElementById('liveSignal');
-        const changed = sig.technical_action && sig.technical_action !== sig.action
-          ? `Technical ${sig.technical_action} became ${sig.action}. `
-          : '';
-        live.textContent = `Live ${sig.strategy || strat} on ${sig.date || 'n/a'}: ${sig.action}. ${changed}News score ${Number(sig.news_score).toFixed(2)}. ${sig.news_reason || ''}`;
-      } catch(e){
-        document.getElementById('btLead').textContent = String(e);
+    function renderKillLog(log) {
+      const el = document.getElementById('killLog');
+      if (!log.length) {
+        el.innerHTML = '<li>No changes this session.</li>';
+        return;
       }
-      try {
-        const ents = await jget(U.journal + '/entries?limit=8');
-        document.getElementById('journal').innerHTML = (ents.entries||[]).slice().reverse().map(e =>
-          `<li><strong>${esc(e.title)}</strong> - ${esc(e.body)}</li>`).join('') || '<li class="muted">No entries</li>';
-      } catch(e){}
+      el.innerHTML = log.map(row => {
+        const when = new Date(row.ts).toLocaleTimeString();
+        const what = row.killed ? 'ON, trading blocked' : 'OFF, paper orders allowed';
+        const who = row.source === 'human' ? 'human' : 'observed';
+        return `<li>${esc(when)} · ${esc(what)} · ${esc(who)}</li>`;
+      }).join('');
     }
-    async function setKill(killed){
-      await jpost(U.risk + '/kill-switch', {killed});
+
+    function paintKill(isKilled, online) {
+      const btn = document.getElementById('killBtn');
+      const hint = document.getElementById('killHint');
+      const label = document.getElementById('killLabel');
+      btn.disabled = !online;
+      btn.classList.toggle('on', !!isKilled);
+      if (!online) {
+        label.textContent = 'Kill switch';
+        hint.textContent = 'risk-guard offline';
+        return;
+      }
+      label.textContent = isKilled ? 'Kill switch ON' : 'Kill switch';
+      hint.textContent = isKilled ? 'Blocked. Click to clear' : 'Click to engage';
+    }
+
+    async function onKill() {
+      if (killed == null) return;
+      const next = !killed;
+      const msg = next
+        ? 'Engage the kill switch? Paper orders stay blocked until a human clears it.'
+        : 'Clear the kill switch? The agent may place paper orders again.';
+      if (!window.confirm(msg)) return;
+      await postJson(U.risk + '/kill-switch', { killed: next });
+      noteKill(next, 'human');
       await refresh();
     }
-    async function runAgent(dry){
+
+    function renderAccount(account, riskState, limits) {
+      const equity = account && Number(account.equity);
+      document.getElementById('kpiEquity').textContent = money(equity);
+      document.getElementById('kpiCash').textContent = account
+        ? 'Cash ' + money(account.cash) + ' · realized ' + money(account.realized_pnl)
+        : 'Broker offline';
+      const positions = account && account.positions ? Object.entries(account.positions) : [];
+      const open = positions.filter(([, p]) => Number(p.qty) > 0);
+      document.getElementById('kpiPos').textContent = open.length ? String(open.length) : 'Flat';
+      document.getElementById('kpiPosHint').textContent = open.length
+        ? open.map(([sym, p]) => sym + ' ' + p.qty + ' @ ' + Number(p.avg_price).toFixed(2)).join(', ')
+        : 'No open paper position';
+      const pnl = riskState ? Number(riskState.realized_pnl_today) : NaN;
+      document.getElementById('kpiPnl').textContent = Number.isFinite(pnl) ? money(pnl) : 'n/a';
+      const limitPct = limits ? Number(limits.daily_loss_limit) : 0.03;
+      const budget = Number.isFinite(equity) ? equity * limitPct : NaN;
+      const used = Number.isFinite(pnl) && pnl < 0 && budget > 0 ? Math.min(1, Math.abs(pnl) / budget) : 0;
+      document.getElementById('pnlBar').style.width = (used * 100).toFixed(1) + '%';
+      document.getElementById('kpiPnlHint').textContent = Number.isFinite(budget)
+        ? 'Realized today vs ' + money(-budget) + ' daily loss limit (' + pct(limitPct) + ')'
+        : 'Daily loss limit unavailable';
+    }
+
+    function renderStrategyKpi(bt) {
+      if (!bt) {
+        document.getElementById('kpiStrat').textContent = 'n/a';
+        document.getElementById('kpiRegime').textContent = 'strategy-engine offline';
+        return;
+      }
+      const live = bt.regime_strategy || bt.selected_strategy || 'n/a';
+      document.getElementById('kpiStrat').textContent = String(bt.selected_strategy || 'n/a').replaceAll('_', ' ');
+      document.getElementById('kpiRegime').textContent =
+        'Regime ' + (bt.current_regime || 'n/a') + ' · live signal ' + String(live).replaceAll('_', ' ');
+    }
+
+    function rowHtml(row, role) {
+      const cls = role === 'selected' ? 'selected' : (role === 'benchmark' ? 'benchmark' : '');
+      const label = role === 'selected' ? ' <span class="pill">selected</span>' : (role === 'benchmark' ? ' <span class="pill">benchmark</span>' : '');
+      return `<tr class="${cls}"><td>${esc(row.name)}${label}</td><td class="num">${pct(row.return)}</td><td class="num">${pct(row.max_drawdown)}</td><td class="num">${esc(row.trades)}</td><td class="num">${row.score == null ? 'n/a' : Number(row.score).toFixed(4)}</td></tr>`;
+    }
+    function tableHtml(rows, pickName) {
+      const body = rows.map(row => {
+        const role = row.name === 'buy_and_hold' ? 'benchmark' : (row.name === pickName ? 'selected' : '');
+        return rowHtml(row, role);
+      }).join('');
+      return `<table><thead><tr><th>Strategy</th><th class="num">Return</th><th class="num">Max drawdown</th><th class="num">Trades</th><th class="num">Score <span class="tip" tabindex="0" data-tip="${esc(SCORE_TIP)}">i</span></th></tr></thead><tbody>${body || '<tr><td colspan="5">No rows</td></tr>'}</tbody></table>`;
+    }
+    function renderTabs() {
+      const tabs = [{ id: 'overall', label: 'Overall' }];
+      (backtest && backtest.regimes || []).forEach(reg => tabs.push({ id: reg.name, label: reg.name }));
+      document.getElementById('regimeTabs').innerHTML = tabs.map(tab =>
+        `<button class="tab" type="button" role="tab" data-tab="${esc(tab.id)}" aria-selected="${tab.id === activeTab ? 'true' : 'false'}">${esc(tab.label)}</button>`
+      ).join('');
+    }
+    function renderActiveTable() {
+      const host = document.getElementById('strategyTable');
+      if (!backtest) {
+        host.innerHTML = '<p class="empty">Backtest unavailable. strategy-engine is offline.</p>';
+        return;
+      }
+      if (activeTab === 'overall') {
+        const rows = (backtest.strategies || []).concat(backtest.buy_hold ? [backtest.buy_hold] : []);
+        host.innerHTML = tableHtml(rows, backtest.selected_strategy);
+        return;
+      }
+      const reg = (backtest.regimes || []).find(item => item.name === activeTab);
+      if (!reg) {
+        host.innerHTML = '<p class="empty">That regime is not in this mock file.</p>';
+        return;
+      }
+      const rows = (reg.strategies || []).concat(reg.buy_hold ? [reg.buy_hold] : []);
+      host.innerHTML = `<p class="panel-note">${esc(reg.start)} to ${esc(reg.end)}. ${esc(reg.label || '')}</p>` + tableHtml(rows, reg.selected_strategy);
+    }
+
+    function drawChart(bt) {
+      const empty = document.getElementById('chartEmpty');
+      const canvas = document.getElementById('equityChart');
+      if (!bt || !bt.equity_curve || !bt.equity_curve.length || typeof Chart === 'undefined') {
+        empty.hidden = false;
+        empty.textContent = typeof Chart === 'undefined'
+          ? 'Chart library failed to load.'
+          : 'Equity curve unavailable. strategy-engine is offline.';
+        return;
+      }
+      empty.hidden = true;
+      const labels = bt.equity_curve.map(p => p.date);
+      const agent = bt.equity_curve.map(p => p.equity);
+      const bhMap = {};
+      (bt.buy_hold_curve || []).forEach(p => { bhMap[p.date] = p.equity; });
+      const bh = labels.map(d => bhMap[d] ?? null);
+      const marks = {};
+      (bt.trade_markers || []).forEach(m => { marks[m.date] = m.side; });
+      const radius = labels.map(d => marks[d] ? 6 : 0);
+      const colors = labels.map(d => marks[d] === 'sell' ? '#ff8d87' : '#3dd68c');
+      const crash = (bt.regimes || []).find(r => r.name === 'crash');
+      const data = {
+        labels,
+        datasets: [
+          {
+            label: 'Paper agent',
+            data: agent,
+            borderColor: '#7eb0ff',
+            backgroundColor: 'rgba(126,176,255,.12)',
+            pointRadius: radius,
+            pointHoverRadius: labels.map(d => marks[d] ? 8 : 0),
+            pointBackgroundColor: colors,
+            borderWidth: 2,
+            tension: .15,
+            fill: false,
+          },
+          {
+            label: 'Buy and hold',
+            data: bh,
+            borderColor: '#f5b942',
+            borderDash: [5, 4],
+            pointRadius: 0,
+            borderWidth: 2,
+            tension: .15,
+          },
+        ],
+      };
+      const options = {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#c5d0e2', boxWidth: 12 } },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { ticks: { color: '#93a0b8', maxTicksLimit: 8 }, grid: { color: 'rgba(38,52,76,.6)' } },
+          y: { ticks: { color: '#93a0b8' }, grid: { color: 'rgba(38,52,76,.6)' } },
+        },
+      };
+      const band = crash ? { start: crash.start, end: crash.end } : null;
+      if (!chart) {
+        chart = new Chart(canvas, { type: 'line', data, options, plugins: [crashBand] });
+      } else {
+        chart.data = data;
+        chart.options = options;
+      }
+      chart.$crash = band;
+      chart.update('none');
+      const n = (bt.trade_markers || []).length;
+      document.getElementById('chartNote').textContent =
+        (bt.selected_strategy || 'Agent') + ' versus buy-and-hold. Shaded band is the crash. ' + n + ' trade marker' + (n === 1 ? '' : 's') + '.';
+    }
+    const crashBand = {
+      id: 'crashBand',
+      beforeDatasetsDraw(c) {
+        const band = c.$crash;
+        if (!band) return;
+        const labels = c.data.labels || [];
+        let i0 = labels.findIndex(d => d >= band.start);
+        let i1 = -1;
+        labels.forEach((d, i) => { if (d <= band.end) i1 = i; });
+        if (i0 < 0 || i1 < i0) return;
+        const x = c.scales.x;
+        const area = c.chartArea;
+        const left = x.getPixelForValue(labels[i0]);
+        const right = x.getPixelForValue(labels[i1]);
+        c.ctx.save();
+        c.ctx.fillStyle = 'rgba(255, 59, 48, .14)';
+        c.ctx.fillRect(left, area.top, Math.max(2, right - left), area.bottom - area.top);
+        c.ctx.restore();
+      },
+    };
+
+    function renderNews(bt) {
+      const host = document.getElementById('news');
+      const items = (bt && bt.scored_news) || [];
+      if (!items.length) {
+        host.innerHTML = '<p class="empty">No scored headlines. market-ingest or strategy-engine is offline.</p>';
+        return;
+      }
+      const rows = items.slice().sort((a, b) => {
+        if (!!b.veto !== !!a.veto) return (b.veto ? 1 : 0) - (a.veto ? 1 : 0);
+        return String(b.date).localeCompare(String(a.date));
+      });
+      host.innerHTML = rows.map(item => {
+        const score = Number(item.score);
+        const cls = score >= 0.15 ? 'pos' : (score <= -0.05 ? 'neg' : 'flat');
+        const sign = score > 0 ? '+' : '';
+        const veto = item.veto ? '<span class="flag">VETO</span>' : '';
+        return `<article class="news-item${item.veto ? ' veto' : ''}"><div class="news-top"><span class="meta">${esc(item.date)} · ${esc(item.regime || item.source || 'mock')}</span><span><span class="chip ${cls}">${sign}${score.toFixed(2)}</span>${veto}</span></div><p class="headline">${esc(item.headline)}</p></article>`;
+      }).join('');
+    }
+
+    function journalTags(entry) {
+      const structured = entry.structured || {};
+      const title = `${entry.title || ''} ${(entry.tags || []).join(' ')}`.toLowerCase();
+      const body = String(entry.body || '').toLowerCase();
+      const tags = [];
+      const add = name => { if (!tags.includes(name)) tags.push(name); };
+      if (title.includes('kill') || body.includes('kill switch')) add('kill');
+      if (title.includes('veto') || body.includes('vetoed') || body.includes(' veto')) add('veto');
+      const action = String(structured.action || structured.side || '').toLowerCase();
+      if (action === 'buy' || action === 'sell' || action === 'hold') add(action);
+      return tags;
+    }
+    function renderJournal(payload) {
+      const host = document.getElementById('journal');
+      const entries = (payload && payload.entries) || [];
+      if (!entries.length) {
+        host.innerHTML = '<p class="empty">No journal entries yet.</p>';
+        return;
+      }
+      host.innerHTML = entries.slice().reverse().map(entry => {
+        const when = entry.ts ? new Date(entry.ts * 1000).toLocaleString() : '';
+        const tags = journalTags(entry).map(tag => `<span class="tag ${esc(tag)}">${esc(tag)}</span>`).join('');
+        return `<article class="entry"><div class="entry-top"><strong>${esc(entry.title || 'Note')}</strong><span class="meta">${esc(when)}</span></div><p>${esc(entry.body || '')}</p><div class="tags">${tags}</div></article>`;
+      }).join('');
+    }
+
+    function renderRisk(health, state, fills) {
+      const err = document.getElementById('riskErr');
+      const list = document.getElementById('riskList');
+      if (!health) {
+        err.hidden = false;
+        err.textContent = 'risk-guard is offline. Limits and the kill switch cannot be shown.';
+        list.innerHTML = '<dt>Status</dt><dd>Offline</dd>';
+        return;
+      }
+      err.hidden = true;
+      const limits = health.limits || {};
+      const stops = ((fills && fills.fills) || []).filter(f => f.stop_loss != null).slice(-4).reverse();
+      const stopText = stops.length
+        ? stops.map(f => f.symbol + ' stop ' + Number(f.stop_loss).toFixed(2)).join(', ')
+        : 'None on recent fills';
+      const trades = state ? state.trades_today : 'n/a';
+      const maxTrades = limits.max_trades_per_day ?? 'n/a';
+      const rows = [
+        ['Kill switch', health.killed ? 'ON' : 'OFF'],
+        ['Max position', pct(limits.max_position_pct)],
+        ['Stop-loss cap', pct(limits.stop_loss_pct)],
+        ['Daily loss limit', pct(limits.daily_loss_limit)],
+        ['Min reward/risk', limits.min_rr ?? 'n/a'],
+        ['Trades today', trades + ' / ' + maxTrades],
+        ['Stop levels', stopText],
+      ];
+      list.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    }
+
+    async function refresh() {
+      if (refreshing) return;
+      refreshing = true;
+      document.getElementById('clock').textContent = new Date().toLocaleString() + ' · mock data · no live orders';
+      try {
+        const checks = await Promise.all(SERVICES.map(async ([, base]) => {
+          try {
+            const r = await fetch(base + '/health');
+            return r.ok;
+          } catch (e) { return false; }
+        }));
+        renderServices(checks);
+        const riskOnline = checks[2];
+        let health = null;
+        let riskState = null;
+        let account = null;
+        let fills = null;
+        let bt = null;
+        let journal = null;
+        try { health = await getJson(U.risk + '/health'); } catch (e) { health = null; }
+        try { riskState = await getJson(U.risk + '/state'); } catch (e) { riskState = null; }
+        try { account = await getJson(U.broker + '/account'); } catch (e) { account = null; }
+        try { fills = await getJson(U.broker + '/fills?limit=10'); } catch (e) { fills = null; }
+        try { bt = await postJson(U.strategy + '/backtest', { symbol: 'SYNTH' }); } catch (e) { bt = null; }
+        try { journal = await getJson(U.journal + '/entries?limit=12'); } catch (e) { journal = null; }
+        if (health) {
+          if (killed !== !!health.killed) noteKill(!!health.killed, 'observe');
+          killed = !!health.killed;
+        }
+        paintKill(killed, riskOnline && !!health);
+        renderAccount(account, riskState, health && health.limits);
+        renderStrategyKpi(bt);
+        backtest = bt;
+        renderTabs();
+        renderActiveTable();
+        drawChart(bt);
+        renderNews(bt);
+        if (journal) renderJournal(journal);
+        else document.getElementById('journal').innerHTML = '<p class="empty">Journal offline.</p>';
+        renderRisk(health, riskState, fills);
+        if (bt && bt.drawdown_penalty != null) {
+          document.getElementById('formulaNote').textContent =
+            'Score = return - ' + bt.drawdown_penalty + ' x max drawdown. Higher wins. Buy-and-hold is the benchmark and is not selected.';
+        }
+      } finally {
+        refreshing = false;
+      }
+    }
+
+    document.getElementById('killBtn').addEventListener('click', () => { onKill().catch(e => alert(e.message)); });
+    document.getElementById('regimeTabs').addEventListener('click', ev => {
+      const btn = ev.target.closest('[data-tab]');
+      if (!btn) return;
+      activeTab = btn.getAttribute('data-tab');
+      renderTabs();
+      renderActiveTable();
+    });
+    async function runAgent(dry) {
       const out = document.getElementById('runOut');
-      out.textContent = 'Running…';
+      out.textContent = dry ? 'Dry run...' : 'Running paper cycle...';
       try {
-        const res = await jpost(U.agent + '/run', {goal:'paper_cycle', symbol:'SYNTH', dry_run: !!dry});
-        out.textContent = JSON.stringify(res, null, 2);
-      } catch(e){ out.textContent = String(e); }
+        const res = await postJson(U.agent + '/run', { goal: 'paper_cycle', symbol: 'SYNTH', dry_run: !!dry });
+        out.textContent = (res.status || 'done') + (res.regime_strategy ? ' · live ' + res.regime_strategy : '');
+      } catch (e) {
+        out.textContent = 'Agent offline. ' + e.message;
+      }
       await refresh();
     }
+    document.getElementById('runBtn').addEventListener('click', () => runAgent(false));
+    document.getElementById('dryBtn').addEventListener('click', () => runAgent(true));
+    try { renderKillLog(JSON.parse(sessionStorage.getItem('sentinel.killLog') || '[]')); } catch (e) {}
     refresh();
-    setInterval(refresh, 8000);
+    setInterval(refresh, 5000);
   </script>
 </body>
 </html>
