@@ -94,7 +94,8 @@
     }
     function renderBacktest(bt){
       const lead = document.getElementById('btLead');
-      lead.textContent = bt.selection_reason || bt.summary || 'Backtest ready.';
+      const mock = bt.mock_label ? bt.mock_label + ' ' : '';
+      lead.textContent = mock + (bt.selection_reason || bt.summary || 'Backtest ready.');
       const rows = (bt.strategies || []).map(s => ({...s, role: s.name === bt.selected_strategy ? 'selected' : 'candidate'}));
       if (bt.buy_hold) rows.push({...bt.buy_hold, role: 'benchmark'});
       const body = rows.map(s => {
@@ -102,9 +103,26 @@
         const label = s.role === 'selected' ? ' <span class="tag">selected</span>' : (s.role === 'benchmark' ? ' <span class="tag">benchmark</span>' : '');
         return `<tr class="${cls}"><td>${esc(s.name)}${label}</td><td>${pct(s.return)}</td><td>${pct(s.max_drawdown)}</td><td>${esc(s.trades)}</td><td>${s.score == null ? 'n/a' : Number(s.score).toFixed(4)}</td></tr>`;
       }).join('');
+      const regimes = (bt.regimes || []).map(reg => {
+        const rrows = (reg.strategies || []).map(s => ({...s, role: s.name === reg.selected_strategy ? 'selected' : 'candidate'}));
+        if (reg.buy_hold) rrows.push({...reg.buy_hold, role: 'benchmark'});
+        const rbody = rrows.map(s => {
+          const cls = s.role === 'selected' ? 'selected' : (s.role === 'benchmark' ? 'benchmark' : '');
+          const label = s.role === 'selected' ? ' <span class="tag">regime pick</span>' : (s.role === 'benchmark' ? ' <span class="tag">benchmark</span>' : '');
+          return `<tr class="${cls}"><td>${esc(s.name)}${label}</td><td>${pct(s.return)}</td><td>${pct(s.max_drawdown)}</td><td>${esc(s.trades)}</td><td>${s.score == null ? 'n/a' : Number(s.score).toFixed(4)}</td></tr>`;
+        }).join('');
+        return `<h3 style="margin:1rem 0 .4rem;font-size:.9rem">${esc(reg.name)} <span class="muted">${esc(reg.start)} to ${esc(reg.end)}</span></h3>` +
+          `<table><thead><tr><th>Strategy</th><th>Return</th><th>Max drawdown</th><th>Trades</th><th>Score</th></tr></thead><tbody>${rbody}</tbody></table>`;
+      }).join('');
+      const crash = (bt.regimes || []).find(reg => reg.name === 'crash');
+      const crashRow = crash && (crash.strategies || []).find(s => s.name === bt.selected_strategy);
+      const crashNote = crash && crashRow && crash.buy_hold
+        ? `During the crash, ${bt.selected_strategy} max drawdown was ${pct(crashRow.max_drawdown)} and buy-and-hold was ${pct(crash.buy_hold.max_drawdown)}.`
+        : '';
       document.getElementById('backtest').innerHTML =
         `<table><thead><tr><th>Strategy</th><th>Return</th><th>Max drawdown</th><th>Trades</th><th>Score</th></tr></thead><tbody>${body}</tbody></table>` +
-        `<p class="muted">Score = return - ${esc(bt.drawdown_penalty)} * max drawdown. Price backtests only; news adjusts the live signal. ${esc(bt.metric_note || '')}</p>`;
+        `<p class="muted">Score = return - ${esc(bt.drawdown_penalty)} * max drawdown. Full-sample pick: ${esc(bt.selected_strategy)}. Current regime ${esc(bt.current_regime || 'n/a')} re-selects ${esc(bt.regime_strategy || 'n/a')} for the live signal. ${esc(crashNote)} Price backtests only; news adjusts the live signal.</p>` +
+        regimes;
       const ex = bt.news_decision_example;
       const box = document.getElementById('newsExample');
       if (!ex) {
@@ -128,7 +146,7 @@
       try {
         const bt = await jpost(U.strategy + '/backtest', {symbol:'SYNTH'});
         renderBacktest(bt);
-        const strat = bt.selected_strategy || 'sma_crossover';
+        const strat = bt.regime_strategy || bt.selected_strategy || 'sma_crossover';
         const sig = await jpost(U.strategy + '/signal', {symbol:'SYNTH', strategy: strat});
         const live = document.getElementById('liveSignal');
         const changed = sig.technical_action && sig.technical_action !== sig.action

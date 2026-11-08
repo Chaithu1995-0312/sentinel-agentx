@@ -222,10 +222,60 @@ def main() -> int:
         else:
             failures.append("cannot score strategies")
 
-        veto = c.post(
-            f"{STRATEGY}/signal",
-            json={"symbol": "SYNTH", "strategy": "sma_crossover", "as_of_date": "2025-08-27"},
-        ).json()
+        regime_names = [reg.get("name") for reg in bt.get("regimes") or []]
+        missing_regimes = [name for name in ("rally", "crash", "chop", "recovery") if name not in regime_names]
+        if missing_regimes:
+            failures.append(f"backtest regimes missing {missing_regimes}")
+        else:
+            bad_regime = False
+            for reg in bt.get("regimes") or []:
+                regime_rows = list(reg.get("strategies") or []) + [reg.get("buy_hold") or {}]
+                if any(row.get("return") is None or row.get("max_drawdown") is None or row.get("trades") is None for row in regime_rows):
+                    failures.append(f"regime {reg.get('name')} missing return, max drawdown, or trades")
+                    bad_regime = True
+            crash = next(reg for reg in bt["regimes"] if reg["name"] == "crash")
+            crash_bh = crash.get("buy_hold") or {}
+            crash_sel = next((row for row in crash.get("strategies") or [] if row.get("name") == bt.get("selected_strategy")), None)
+            if float(crash_bh.get("max_drawdown") or 0) < 0.20:
+                failures.append(f"crash buy-and-hold drawdown is not sharp: {crash_bh.get('max_drawdown')}")
+                bad_regime = True
+            elif crash_sel is None:
+                failures.append("selected strategy missing from crash regime")
+                bad_regime = True
+            elif float(crash_sel["max_drawdown"]) >= float(crash_bh["max_drawdown"]):
+                failures.append(
+                    f"selected {bt.get('selected_strategy')} crash drawdown {crash_sel['max_drawdown']} "
+                    f"did not beat buy-and-hold {crash_bh['max_drawdown']}"
+                )
+                bad_regime = True
+            if bt.get("regime_strategy") not in required:
+                failures.append(f"regime_strategy missing: {bt.get('regime_strategy')}")
+                bad_regime = True
+            elif run.get("regime_strategy") != bt.get("regime_strategy"):
+                failures.append(
+                    f"orchestrator regime strategy {run.get('regime_strategy')} != {bt.get('regime_strategy')}"
+                )
+                bad_regime = True
+            if not bad_regime:
+                print(
+                    f"[demo] OK regimes; current {bt.get('current_regime')} "
+                    f"uses {bt.get('regime_strategy')}; "
+                    f"crash drawdown {crash_sel['max_drawdown']} < buy-and-hold {crash_bh['max_drawdown']}"
+                )
+
+        example = bt.get("news_decision_example") or {}
+        if not example.get("date") or not example.get("strategy"):
+            failures.append(f"news_decision_example missing date or strategy: {example}")
+            veto = {}
+        else:
+            veto = c.post(
+                f"{STRATEGY}/signal",
+                json={
+                    "symbol": "SYNTH",
+                    "strategy": example["strategy"],
+                    "as_of_date": example["date"],
+                },
+            ).json()
         pp("news veto", {
             "date": veto.get("date"),
             "technical_action": veto.get("technical_action"),
@@ -245,13 +295,24 @@ def main() -> int:
         elif veto.get("size_multiplier") is None or float(veto["size_multiplier"]) != 0.0:
             failures.append(f"veto size_multiplier should be 0, got {veto.get('size_multiplier')}")
         else:
-            print("[demo] OK strongly negative news vetoed the SMA buy")
+            print(f"[demo] OK strongly negative news vetoed the {example.get('strategy')} buy")
 
-        boosted = c.post(
-            f"{STRATEGY}/signal",
-            json={"symbol": "SYNTH", "strategy": "bollinger_breakout", "as_of_date": "2025-09-26"},
-        ).json()
-        if boosted.get("technical_action") != "buy" or boosted.get("action") != "buy":
+        boost_example = bt.get("news_boost_example") or {}
+        if not boost_example.get("date") or not boost_example.get("strategy"):
+            failures.append(f"news_boost_example missing date or strategy: {boost_example}")
+            boosted = {}
+        else:
+            boosted = c.post(
+                f"{STRATEGY}/signal",
+                json={
+                    "symbol": "SYNTH",
+                    "strategy": boost_example["strategy"],
+                    "as_of_date": boost_example["date"],
+                },
+            ).json()
+        if not boosted:
+            pass
+        elif boosted.get("technical_action") != "buy" or boosted.get("action") != "buy":
             failures.append(
                 f"expected positive-news buy to stay a buy, got "
                 f"{boosted.get('technical_action')} -> {boosted.get('action')}"
@@ -334,8 +395,10 @@ def main() -> int:
             failures.append("journal does not name the selected strategy")
         elif "max drawdown" not in bodies.lower():
             failures.append("journal does not explain the max-drawdown comparison")
+        elif "regime" not in bodies.lower():
+            failures.append("journal does not mention the regime re-selection")
         else:
-            print("[demo] OK journal has entries, news score, and strategy pick")
+            print("[demo] OK journal has entries, news score, strategy pick, and regime")
 
         acct = c.get(f"{BROKER}/account").json()
         pp("account", acct)

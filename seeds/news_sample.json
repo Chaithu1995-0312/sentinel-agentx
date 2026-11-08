@@ -1,57 +1,338 @@
 [
   {
-    "date": "2025-08-01",
-    "headline": "Index futures steady as traders await macro data",
-    "source": "Reuters"
+    "date": "2024-11-18",
+    "headline": "Index futures steady as buyers add to the rally",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-08-13",
-    "headline": "Banking sector leads morning gains on rate outlook",
-    "source": "Bloomberg"
+    "date": "2024-12-02",
+    "headline": "Banking sector leads morning gains",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-08-25",
-    "headline": "IT stocks mixed after overnight US tech moves",
-    "source": "Economic Times"
+    "date": "2024-12-16",
+    "headline": "Growth names surge on upbeat earnings",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-08-27",
+    "date": "2024-12-30",
+    "headline": "Risk appetite improves as the rally broadens",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-01-13",
+    "headline": "Energy names firm and refining margins improve",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-01-27",
+    "headline": "Breadth rises with another day of gains",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-02-10",
+    "headline": "Index futures steady as buyers add to the rally",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-02-24",
+    "headline": "Banking sector leads morning gains",
+    "source": "MockWire",
+    "regime": "rally",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-10",
     "headline": "Markets plunge on surprise default fears and heavy selloff",
-    "source": "Reuters"
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-11",
+    "headline": "Stocks crash as recession worries spark a selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-12",
+    "headline": "Benchmarks tumble in a crisis selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-13",
+    "headline": "Prices plunge again as default fears return",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-14",
+    "headline": "A fresh selloff hits as crash headlines spread",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-17",
+    "headline": "Markets plunge on surprise default fears and heavy selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-18",
+    "headline": "Stocks crash as recession worries spark a selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-19",
+    "headline": "Benchmarks tumble in a crisis selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-20",
+    "headline": "Prices plunge again as default fears return",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-21",
+    "headline": "A fresh selloff hits as crash headlines spread",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-24",
+    "headline": "Markets plunge on surprise default fears and heavy selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-25",
+    "headline": "Stocks crash as recession worries spark a selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-26",
+    "headline": "Benchmarks tumble in a crisis selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-27",
+    "headline": "Prices plunge again as default fears return",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-28",
+    "headline": "A fresh selloff hits as crash headlines spread",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-03-31",
+    "headline": "Markets plunge on surprise default fears and heavy selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-01",
+    "headline": "Stocks crash as recession worries spark a selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-02",
+    "headline": "Benchmarks tumble in a crisis selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-03",
+    "headline": "Prices plunge again as default fears return",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-04",
+    "headline": "A fresh selloff hits as crash headlines spread",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-07",
+    "headline": "Markets plunge on surprise default fears and heavy selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-08",
+    "headline": "Stocks crash as recession worries spark a selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-09",
+    "headline": "Benchmarks tumble in a crisis selloff",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-10",
+    "headline": "Prices plunge again as default fears return",
+    "source": "MockWire",
+    "regime": "crash",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-11",
+    "headline": "Index holds a tight range with no fresh catalyst",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-04-25",
+    "headline": "Market breadth narrows in a mixed session",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-05-09",
+    "headline": "Traders describe a mixed and narrow tape",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-05-23",
+    "headline": "Volumes stay light in another mixed session",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-06-06",
+    "headline": "Index holds a tight range with no fresh catalyst",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-06-20",
+    "headline": "Market breadth narrows in a mixed session",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-07-04",
+    "headline": "Traders describe a mixed and narrow tape",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-07-18",
+    "headline": "Volumes stay light in another mixed session",
+    "source": "MockWire",
+    "regime": "chop",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-07-24",
+    "headline": "Stocks rebound as risk appetite returns",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-08-07",
+    "headline": "Rally resumes and market breadth improves",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
+  },
+  {
+    "date": "2025-08-21",
+    "headline": "Flows turn positive and gains broaden",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   },
   {
     "date": "2025-09-04",
-    "headline": "Rupee holds range; crude stays soft",
-    "source": "CNBC"
+    "headline": "Recovery firms as earnings growth improves",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-09-16",
-    "headline": "FII flows turn positive for second straight week",
-    "source": "Moneycontrol"
+    "date": "2025-09-18",
+    "headline": "Risk appetite builds on a steady rebound",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-09-26",
-    "headline": "Auto makers report steady monthly volumes",
-    "source": "Reuters"
+    "date": "2025-10-02",
+    "headline": "Stocks rebound as risk appetite returns",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   },
   {
-    "date": "2025-10-08",
-    "headline": "Energy names firm as refining margins improve",
-    "source": "Bloomberg"
-  },
-  {
-    "date": "2025-10-20",
-    "headline": "Market breadth narrows into weekly close",
-    "source": "Economic Times"
+    "date": "2025-10-16",
+    "headline": "Rally resumes and market breadth improves",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   },
   {
     "date": "2025-10-30",
-    "headline": "Bond yields ease; risk appetite improves modestly",
-    "source": "CNBC"
-  },
-  {
-    "date": "2025-11-11",
-    "headline": "Pharma stocks lag broader market rally",
-    "source": "Moneycontrol"
+    "headline": "Flows turn positive and gains broaden",
+    "source": "MockWire",
+    "regime": "recovery",
+    "note": "MOCK headline, not a real news report"
   }
 ]

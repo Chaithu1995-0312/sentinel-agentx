@@ -61,7 +61,7 @@ def bars(limit: int = 90, symbol: str = "SYNTH"):
                 "volume": float(r["volume"]),
             }
         )
-    return {"symbol": symbol, "bars": out, "count": len(out), "note": "synthetic seed"}
+    return {"symbol": symbol, "bars": out, "count": len(out), "note": "MOCK synthetic seed, not a real market"}
 
 
 @app.get("/news")
@@ -69,7 +69,7 @@ def news(limit: int = 20):
     if not NEWS.exists():
         raise HTTPException(503, f"seed news missing: {NEWS}")
     items = json.loads(NEWS.read_text())
-    return {"items": items[:limit], "count": len(items[:limit]), "note": "synthetic seed"}
+    return {"items": items[:limit], "count": len(items[:limit]), "note": "MOCK synthetic headlines, not a real news feed"}
 
 
 @app.get("/last-price")

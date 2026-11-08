@@ -38,7 +38,9 @@ Orders never skip `risk-guard`. Broker re-checks kill switch (fail-closed if ris
 - `rsi_mean_reversion` — Wilder RSI(2), buy on a cross below 30, sell on a cross above 70
 - `bollinger_breakout` — 20-bar, 2 standard-deviation bands; buy on a cross above the upper band, sell on a cross below the midline
 
-The orchestrator ranks trading strategies by `score = return - 0.5 * max_drawdown` (higher wins; ties break on return, then fewer trades, then name). It journals that comparison and calls `POST /signal` with the winner. Buy-and-hold is reported beside them and is not a candidate. Backtests are price-only.
+The orchestrator ranks trading strategies by `score = return - 0.5 * max_drawdown` (higher wins; ties break on return, then fewer trades, then name). It journals that comparison. Buy-and-hold is reported beside them and is not a candidate. Backtests are price-only.
+
+The default seed is mock data from `scripts/gen_mock_ohlcv.py`: about 252 weekdays and four regimes (rally, crash, chop, recovery) listed in `seeds/ohlcv_regimes.json`. `POST /backtest` also returns each strategy's return, max drawdown, and trade count inside every regime, measured on the continuous equity curve. The orchestrator re-selects with the same score on the current regime and uses that strategy for `POST /signal`. The full-sample winner stays `selected_strategy`.
 
 ## News adjustment
 

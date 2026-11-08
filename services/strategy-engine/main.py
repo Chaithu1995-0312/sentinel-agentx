@@ -290,6 +290,7 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
     position = 0
     trades = 0
     equity: list[float] = []
+    trade_dates: list[str] = []
     for i, px in enumerate(closes):
         act = actions[i]
         if position == 0 and act == "buy":
@@ -297,11 +298,13 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
             cash = 0.0
             position = 1
             trades += 1
+            trade_dates.append(dates[i])
         elif position == 1 and act == "sell":
             cash = qty * px
             qty = 0.0
             position = 0
             trades += 1
+            trade_dates.append(dates[i])
         equity.append(cash + qty * px)
     final = equity[-1] if equity else starting_cash
     ret = (final / starting_cash) - 1.0 if starting_cash else 0.0
@@ -311,6 +314,7 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
         "trades": trades,
         "final_equity": final,
         "equity": equity,
+        "trade_dates": trade_dates,
     }
 
 
@@ -607,7 +611,7 @@ def _check_strategy(name: str, fast: int, slow: int) -> None:
 
 
 def _bars_as_of(as_of: str | None) -> list[dict]:
-    bars = _fetch_bars(limit=500)
+    bars = _fetch_bars(limit=2000)
     if not as_of:
         return bars
     try:
@@ -647,6 +651,110 @@ def _news_veto_example(bars: list[dict], news: list[dict], fast: int, slow: int,
                 "size_multiplier": adjusted["size_multiplier"],
             }
     return None
+
+
+def _news_boost_example(bars: list[dict], news: list[dict], fast: int, slow: int, symbol: str) -> dict | None:
+    """First buy whose positive headlines raise confidence by 0.10 and leave the buy in place."""
+    for strategy in STRATEGIES:
+        actions = _actions(strategy, [float(b["close"]) for b in bars], fast, slow)
+        for i, act in enumerate(actions):
+            if act != "buy":
+                continue
+            tech = _technical(strategy, bars[: i + 1], fast, slow, symbol)
+            if tech["action"] != "buy":
+                continue
+            adjusted = _apply_news(tech, news, bars[i]["date"])
+            if adjusted["action"] != "buy":
+                continue
+            delta = round(float(adjusted["confidence"]) - float(adjusted["technical_confidence"]), 3)
+            if float(adjusted["news_score"]) < NEWS_POSITIVE_SCORE or delta != 0.10:
+                continue
+            if float(adjusted["size_multiplier"]) != 1.0:
+                continue
+            return {
+                "date": bars[i]["date"],
+                "strategy": strategy,
+                "price": tech.get("price"),
+                "technical_action": "buy",
+                "action": "buy",
+                "news_score": adjusted["news_score"],
+                "news_reason": adjusted["news_reason"],
+                "technical_confidence": adjusted["technical_confidence"],
+                "confidence": adjusted["confidence"],
+                "size_multiplier": adjusted["size_multiplier"],
+            }
+    return None
+
+
+def _load_regimes() -> dict:
+    path = _seed_path("SEED_REGIME_PATH", "./seeds/ohlcv_regimes.json")
+    if not path.exists():
+        return {"label": "", "regimes": []}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {"label": "", "regimes": []}
+    data.setdefault("regimes", [])
+    return data
+
+
+def _window_metrics(name: str, sim: dict, dates: list[str], start: str, end: str) -> dict:
+    """Continuous-backtest result inside one regime. The prior close is the anchor."""
+    anchor = None
+    last = None
+    for day, equity in zip(dates, sim["equity"]):
+        if day < start:
+            anchor = equity
+        elif day <= end:
+            last = equity
+    series: list[float] = []
+    if anchor is not None:
+        series.append(float(anchor))
+    for day, equity in zip(dates, sim["equity"]):
+        if start <= day <= end:
+            series.append(float(equity))
+    if len(series) < 2 or last is None:
+        ret = 0.0
+        dd = 0.0
+        final = float(series[-1]) if series else 0.0
+    else:
+        ret = (series[-1] / series[0]) - 1.0 if series[0] else 0.0
+        dd = _max_drawdown(series)
+        final = series[-1]
+    trades = sum(1 for day in sim.get("trade_dates") or [] if start <= day <= end)
+    packed = _pack(
+        name,
+        {"return": ret, "max_drawdown": dd, "trades": trades, "final_equity": final},
+    )
+    return packed
+
+
+def _regime_reports(sims: dict[str, dict], bh_sim: dict, dates: list[str], meta: dict) -> list[dict]:
+    reports = []
+    for reg in meta.get("regimes") or []:
+        start = str(reg.get("start") or "")
+        end = str(reg.get("end") or "")
+        if not start or not end:
+            continue
+        rows = [_window_metrics(name, sims[name], dates, start, end) for name in STRATEGIES]
+        bh = _window_metrics("buy_and_hold", bh_sim, dates, start, end)
+        ranked = _rank(rows)
+        reports.append(
+            {
+                "name": reg.get("name"),
+                "start": start,
+                "end": end,
+                "bars": reg.get("bars"),
+                "label": (
+                    "MOCK regime. Return and max drawdown are measured on the continuous "
+                    "backtest inside this window, including a position carried in."
+                ),
+                "selected_strategy": ranked[0]["name"],
+                "strategies": rows,
+                "buy_hold": bh,
+            }
+        )
+    return reports
 
 
 class SignalRequest(BaseModel):
@@ -700,7 +808,7 @@ def signal(body: SignalRequest):
 def backtest(body: BacktestRequest):
     if body.fast >= body.slow:
         raise HTTPException(400, "fast must be < slow")
-    bars = _fetch_bars(limit=500)
+    bars = _fetch_bars(limit=2000)
     closes = [float(b["close"]) for b in bars]
     dates = [b["date"] for b in bars]
     need = max(body.slow + 2, BB_PERIOD + 2, RSI_PERIOD + 2)
@@ -709,9 +817,11 @@ def backtest(body: BacktestRequest):
 
     rows = []
     curves: dict[str, list] = {}
+    sims: dict[str, dict] = {}
     for name in STRATEGIES:
         actions = _actions(name, closes, body.fast, body.slow)
         sim = _simulate(closes, dates, actions, body.starting_cash)
+        sims[name] = sim
         rows.append(_pack(name, sim))
         curves[name] = [
             {"date": d, "equity": round(e, 2)} for d, e in zip(dates, sim["equity"])
@@ -724,6 +834,12 @@ def backtest(body: BacktestRequest):
     reason = _selection_reason(ranked, bh)
     news = _fetch_news()
     example = _news_veto_example(bars, news, body.fast, body.slow, body.symbol)
+    boost = _news_boost_example(bars, news, body.fast, body.slow, body.symbol)
+    meta = _load_regimes()
+    regimes = _regime_reports(sims, bh_sim, dates, meta)
+    last_day = dates[-1]
+    current = next((reg for reg in regimes if reg["start"] <= last_day <= reg["end"]), None)
+    regime_strategy = (current or {}).get("selected_strategy") or best["name"]
     summary = (
         f"Selected {best['name']} score {best['score']:.4f} "
         f"(return {best['return'] * 100:.2f}%, max drawdown {best['max_drawdown'] * 100:.2f}%, "
@@ -758,5 +874,10 @@ def backtest(body: BacktestRequest):
             {"date": d, "equity": round(e, 2)} for d, e in zip(dates, bh_sim["equity"])
         ],
         "summary": summary,
+        "mock_label": meta.get("label") or "",
+        "current_regime": (current or {}).get("name"),
+        "regime_strategy": regime_strategy,
+        "regimes": regimes,
         "news_decision_example": example,
+        "news_boost_example": boost,
     }

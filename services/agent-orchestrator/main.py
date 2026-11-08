@@ -141,6 +141,36 @@ def pick_strategy(bt: dict[str, Any]) -> tuple[str, str]:
     return str(best["name"]), " ".join(parts)
 
 
+def pick_live_strategy(bt: dict[str, Any]) -> tuple[str, str]:
+    """Re-select inside the current mock regime with the same score. Falls back to the full-sample winner."""
+    penalty = float(bt.get("drawdown_penalty", 0.5))
+    current = bt.get("current_regime")
+    match = next((reg for reg in bt.get("regimes") or [] if reg.get("name") == current), None)
+    rows = list((match or {}).get("strategies") or [])
+    fallback = str(bt.get("selected_strategy") or bt.get("regime_strategy") or "")
+    if not match or not rows:
+        return fallback, ""
+
+    def sort_key(row: dict[str, Any]) -> tuple:
+        score = float(row["return"]) - penalty * float(row["max_drawdown"])
+        return (-score, -float(row["return"]), int(row["trades"]), str(row["name"]))
+
+    best = sorted(rows, key=sort_key)[0]
+    score = float(best["return"]) - penalty * float(best["max_drawdown"])
+    bh = match.get("buy_hold") or {}
+    note = (
+        f"Current mock regime {current} ({match.get('start')} to {match.get('end')}) "
+        f"re-selects {best['name']} for the live signal. "
+        f"Its regime score {score:.4f} is the best trading strategy inside that window "
+        f"(return {float(best['return']) * 100:.2f}%, "
+        f"max drawdown {float(best['max_drawdown']) * 100:.2f}%, "
+        f"{_trade_phrase(best['trades'])}). "
+        f"Buy-and-hold in this regime returned {float(bh.get('return') or 0) * 100:.2f}% "
+        f"with max drawdown {float(bh.get('max_drawdown') or 0) * 100:.2f}%."
+    )
+    return str(best["name"]), note
+
+
 def _bt_brief(bt: dict[str, Any], chosen: str) -> dict[str, Any]:
     return {
         "selected_strategy": chosen,
@@ -164,6 +194,32 @@ def _bt_brief(bt: dict[str, Any], chosen: str) -> dict[str, Any]:
             ),
             "trades": (bt.get("buy_hold") or {}).get("trades", bt.get("buy_hold_trades")),
         },
+        "current_regime": bt.get("current_regime"),
+        "regime_strategy": bt.get("regime_strategy"),
+        "regimes": [
+            {
+                "name": reg.get("name"),
+                "start": reg.get("start"),
+                "end": reg.get("end"),
+                "selected_strategy": reg.get("selected_strategy"),
+                "strategies": [
+                    {
+                        "name": row.get("name"),
+                        "return": row.get("return"),
+                        "max_drawdown": row.get("max_drawdown"),
+                        "trades": row.get("trades"),
+                        "score": row.get("score"),
+                    }
+                    for row in reg.get("strategies") or []
+                ],
+                "buy_hold": {
+                    "return": (reg.get("buy_hold") or {}).get("return"),
+                    "max_drawdown": (reg.get("buy_hold") or {}).get("max_drawdown"),
+                    "trades": (reg.get("buy_hold") or {}).get("trades"),
+                },
+            }
+            for reg in bt.get("regimes") or []
+        ],
     }
 
 
@@ -227,11 +283,18 @@ def run(body: RunRequest):
             steps.append({"tool": "get_market", "result": {"last": market.get("last")}})
             bt = tool_run_backtest(client, symbol)
             chosen, selection_reason = pick_strategy(bt)
+            live_strategy, regime_note = pick_live_strategy(bt)
+            journal_reason = f"{selection_reason} {regime_note}".strip()
             steps.append({"tool": "run_backtest", "result": _bt_brief(bt, chosen)})
             steps.append(
                 {
                     "tool": "select_strategy",
-                    "result": {"strategy": chosen, "reason": selection_reason},
+                    "result": {
+                        "strategy": chosen,
+                        "reason": selection_reason,
+                        "regime_strategy": live_strategy,
+                        "current_regime": bt.get("current_regime"),
+                    },
                 }
             )
             j = tool_journal(
@@ -249,7 +312,7 @@ def run(body: RunRequest):
                     },
                     None,
                     chosen,
-                    selection_reason,
+                    journal_reason,
                 ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
@@ -258,6 +321,8 @@ def run(body: RunRequest):
                 "status": "blocked_kill_switch",
                 "selected_strategy": chosen,
                 "selection_reason": selection_reason,
+                "regime_strategy": live_strategy,
+                "current_regime": bt.get("current_regime"),
                 "steps": steps,
                 "order": None,
             }
@@ -272,9 +337,19 @@ def run(body: RunRequest):
 
         bt = tool_run_backtest(client, symbol)
         chosen, selection_reason = pick_strategy(bt)
+        live_strategy, regime_note = pick_live_strategy(bt)
+        journal_reason = f"{selection_reason} {regime_note}".strip()
         steps.append({"tool": "run_backtest", "result": _bt_brief(bt, chosen)})
         steps.append(
-            {"tool": "select_strategy", "result": {"strategy": chosen, "reason": selection_reason}}
+            {
+                "tool": "select_strategy",
+                "result": {
+                    "strategy": chosen,
+                    "reason": selection_reason,
+                    "regime_strategy": live_strategy,
+                    "current_regime": bt.get("current_regime"),
+                },
+            }
         )
         sel = tool_journal(
             client,
@@ -283,13 +358,13 @@ def run(body: RunRequest):
                     "title": f"Selected {chosen}",
                     "symbol": symbol,
                     "action": "compare strategies",
-                    "reason": selection_reason,
+                    "reason": journal_reason,
                     "vs_buy_hold": bt.get("summary"),
-                    "tags": ["strategy_selection", chosen],
+                    "tags": ["strategy_selection", chosen, live_strategy],
                 },
                 None,
                 chosen,
-                selection_reason,
+                journal_reason,
             ),
         )
         steps.append({"tool": "journal_selection", "result": {"id": sel.get("id")}})
@@ -301,10 +376,12 @@ def run(body: RunRequest):
                 "backtest": bt,
                 "selected_strategy": chosen,
                 "selection_reason": selection_reason,
+                "regime_strategy": live_strategy,
+                "current_regime": bt.get("current_regime"),
                 "steps": steps,
             }
 
-        sig = tool_signal(client, symbol, chosen)
+        sig = tool_signal(client, symbol, live_strategy)
         steps.append({"tool": "get_signal", "result": sig})
 
         if sig.get("action") not in ("buy", "sell"):
@@ -326,8 +403,8 @@ def run(body: RunRequest):
                         "tags": ["hold", chosen],
                     },
                     sig,
-                    chosen,
-                    selection_reason,
+                    live_strategy,
+                    journal_reason,
                 ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
@@ -337,6 +414,8 @@ def run(body: RunRequest):
                 "signal": sig,
                 "selected_strategy": chosen,
                 "selection_reason": selection_reason,
+                "regime_strategy": live_strategy,
+                "current_regime": bt.get("current_regime"),
                 "backtest_summary": bt.get("summary"),
                 "steps": steps,
             }
@@ -366,8 +445,8 @@ def run(body: RunRequest):
                             "tags": ["hold", chosen],
                         },
                         sig,
-                        chosen,
-                        selection_reason,
+                        live_strategy,
+                        journal_reason,
                     ),
                 )
                 steps.append({"tool": "journal", "result": {"id": j.get("id")}})
@@ -377,6 +456,8 @@ def run(body: RunRequest):
                     "signal": sig,
                     "selected_strategy": chosen,
                     "selection_reason": selection_reason,
+                    "regime_strategy": live_strategy,
+                    "current_regime": bt.get("current_regime"),
                     "steps": steps,
                 }
             qty = min(qty, have)
@@ -425,8 +506,8 @@ def run(body: RunRequest):
                         "tags": ["blocked", str(risk.get("reason")), chosen],
                     },
                     sig,
-                    chosen,
-                    selection_reason,
+                    live_strategy,
+                    journal_reason,
                 ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
@@ -437,6 +518,8 @@ def run(body: RunRequest):
                 "signal": sig,
                 "selected_strategy": chosen,
                 "selection_reason": selection_reason,
+                "regime_strategy": live_strategy,
+                "current_regime": bt.get("current_regime"),
                 "steps": steps,
                 "order": None,
             }
@@ -459,8 +542,8 @@ def run(body: RunRequest):
                         "tags": ["dry_run", chosen],
                     },
                     sig,
-                    chosen,
-                    selection_reason,
+                    live_strategy,
+                    journal_reason,
                 ),
             )
             steps.append({"tool": "journal", "result": {"id": j.get("id")}})
@@ -471,6 +554,8 @@ def run(body: RunRequest):
                 "signal": sig,
                 "selected_strategy": chosen,
                 "selection_reason": selection_reason,
+                "regime_strategy": live_strategy,
+                "current_regime": bt.get("current_regime"),
                 "steps": steps,
             }
 
@@ -511,8 +596,8 @@ def run(body: RunRequest):
                     "extra": {"fill_id": (fill.get("fill") or {}).get("fill_id")},
                 },
                 sig,
-                chosen,
-                selection_reason,
+                live_strategy,
+                journal_reason,
             ),
         )
         steps.append({"tool": "journal", "result": {"id": j.get("id"), "body": j.get("body")}})
@@ -525,6 +610,8 @@ def run(body: RunRequest):
             "order": fill,
             "selected_strategy": chosen,
             "selection_reason": selection_reason,
+            "regime_strategy": live_strategy,
+            "current_regime": bt.get("current_regime"),
             "backtest_summary": bt.get("summary"),
             "steps": steps,
             "tokens_used": _tokens_used,
