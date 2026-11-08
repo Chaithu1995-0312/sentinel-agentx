@@ -38,7 +38,7 @@ python scripts/demo_run.py
 - **Hard risk** — position %, stop-loss %, daily loss, max trades/day, min RR (`risk-guard`)
 - **Human kill switch** — persisted under `data/kill_switch.json`; agent cannot bypass; fail-closed
 - **Mock year of prices** — `python scripts/gen_mock_ohlcv.py` (fixed seed) writes about 12 months of weekday bars with a rally, a sharp crash, chop, and a recovery. It is labeled mock data. The old 80-day uptrend is `seeds/ohlcv_short_sample.csv`.
-- **Backtest vs buy-and-hold** — SMA crossover, RSI(2) mean reversion, and Bollinger breakout, overall and inside each regime. The orchestrator picks the best full-sample score, `return - 0.5 * max drawdown`, then re-selects with that same score inside the current regime for the live signal. Buy-and-hold is the benchmark only. The dashboard shows both tables.
+- **Backtest vs buy-and-hold** — SMA crossover, RSI(2) mean reversion, and Bollinger breakout, overall and inside each regime. Fills pay 10 bps fee plus 5 bps slippage per side. The orchestrator ranks by net score, `net return - 0.5 * net max drawdown`, and will not hold a strategy with a negative net score (it stays in cash). A live switch needs a 2 percentage point lead. Buy-and-hold is the benchmark only.
 - **News-aware signals** — lexicon sentiment in `strategy-engine` (no LLM). Strongly negative crash headlines veto a buy; positive headlines raise confidence by 0.10. The signal carries `news_score` and `news_reason`, and the journal says them in plain English.
 - **Plain-language journal** — template text per trade (`journal-api`)
 - **Agent = tool loop** — orchestrator calls APIs (not a chatbot)

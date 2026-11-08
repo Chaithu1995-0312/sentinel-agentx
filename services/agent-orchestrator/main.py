@@ -1,7 +1,10 @@
 """agent-orchestrator — tool loop calling sibling services (not a chatbot)."""
 from __future__ import annotations
 
+import json
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -25,6 +28,13 @@ STRATEGY_URL = os.getenv("STRATEGY_ENGINE_URL", "http://127.0.0.1:8002")
 RISK_URL = os.getenv("RISK_GUARD_URL", "http://127.0.0.1:8003")
 BROKER_URL = os.getenv("PAPER_BROKER_URL", "http://127.0.0.1:8004")
 JOURNAL_URL = os.getenv("JOURNAL_API_URL", "http://127.0.0.1:8006")
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from shared.selection import apply_hysteresis  # noqa: E402
+
+SWITCH_MARGIN = float(os.getenv("SWITCH_MARGIN", "0.02"))
+CHOICE_PATH = _ROOT / "data" / "strategy_choice.json"
 
 MAX_POS = float(os.getenv("RISK_MAX_POSITION_PCT", "0.05"))
 STOP_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", "0.02"))
@@ -88,6 +98,26 @@ def _trade_phrase(n: int) -> str:
     return f"{n} trade" if int(n) == 1 else f"{n} trades"
 
 
+def _load_choice() -> str | None:
+    try:
+        return str(json.loads(CHOICE_PATH.read_text()).get("strategy") or "") or None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _save_choice(name: str) -> None:
+    CHOICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHOICE_PATH.write_text(json.dumps({"strategy": name}))
+
+
+def _net_score(row: dict[str, Any], penalty: float) -> float:
+    if row.get("net_score") is not None:
+        return float(row["net_score"])
+    if row.get("score") is not None:
+        return float(row["score"])
+    return float(row["return"]) - penalty * float(row["max_drawdown"])
+
+
 def pick_strategy(bt: dict[str, Any]) -> tuple[str, str]:
     """Pick the trading strategy with the best return-minus-drawdown score.
 
@@ -100,11 +130,13 @@ def pick_strategy(bt: dict[str, Any]) -> tuple[str, str]:
         raise HTTPException(502, "backtest returned no strategies")
 
     def sort_key(row: dict[str, Any]) -> tuple:
-        score = float(row["return"]) - penalty * float(row["max_drawdown"])
+        score = _net_score(row, penalty)
         return (-score, -float(row["return"]), int(row["trades"]), str(row["name"]))
 
     ranked = sorted(rows, key=sort_key)
     best = ranked[0]
+    if bt.get("selected_strategy") == "cash":
+        return "cash", str(bt.get("selection_reason") or "Net score is negative, so the book stays in cash.")
     if best["name"] == bt.get("selected_strategy") and bt.get("selection_reason"):
         return str(best["name"]), str(bt["selection_reason"])
 
@@ -152,23 +184,28 @@ def pick_live_strategy(bt: dict[str, Any]) -> tuple[str, str]:
         return fallback, ""
 
     def sort_key(row: dict[str, Any]) -> tuple:
-        score = float(row["return"]) - penalty * float(row["max_drawdown"])
+        score = _net_score(row, penalty)
         return (-score, -float(row["return"]), int(row["trades"]), str(row["name"]))
 
-    best = sorted(rows, key=sort_key)[0]
-    score = float(best["return"]) - penalty * float(best["max_drawdown"])
+    ranked = sorted(rows, key=sort_key)
+    best = ranked[0]
+    score = _net_score(best, penalty)
     bh = match.get("buy_hold") or {}
+    raw_name = "cash" if score < 0 else str(best["name"])
+    choice, hyst = apply_hysteresis(ranked, _load_choice(), float(bt.get("switch_margin") or SWITCH_MARGIN))
+    _save_choice(choice)
     note = (
         f"Current mock regime {current} ({match.get('start')} to {match.get('end')}) "
-        f"re-selects {best['name']} for the live signal. "
-        f"Its regime score {score:.4f} is the best trading strategy inside that window "
-        f"(return {float(best['return']) * 100:.2f}%, "
-        f"max drawdown {float(best['max_drawdown']) * 100:.2f}%, "
+        f"ranks {raw_name} first on net score {score:.4f} "
+        f"(net return {float(best['return']) * 100:.2f}%, "
+        f"gross {float(best.get('gross_return', best['return'])) * 100:.2f}%, "
+        f"net max drawdown {float(best['max_drawdown']) * 100:.2f}%, "
         f"{_trade_phrase(best['trades'])}). "
-        f"Buy-and-hold in this regime returned {float(bh.get('return') or 0) * 100:.2f}% "
-        f"with max drawdown {float(bh.get('max_drawdown') or 0) * 100:.2f}%."
+        f"{hyst} "
+        f"Buy-and-hold in this regime net return {float(bh.get('return') or 0) * 100:.2f}% "
+        f"with net max drawdown {float(bh.get('max_drawdown') or 0) * 100:.2f}%."
     )
-    return str(best["name"]), note
+    return choice, note
 
 
 def _bt_brief(bt: dict[str, Any], chosen: str) -> dict[str, Any]:

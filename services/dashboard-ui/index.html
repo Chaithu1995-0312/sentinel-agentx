@@ -336,7 +336,7 @@
       ['Journal', U.journal],
       ['UI', U.dashboard],
     ];
-    const SCORE_TIP = 'score = return - 0.5 x max drawdown. Higher wins. Ties break on return, then fewer trades. Buy-and-hold is the benchmark and is not selected.';
+    const SCORE_TIP = 'Net score = net return - 0.5 x net max drawdown. Costs are 10 bps fee plus 5 bps slippage per side. Higher wins. A negative net score selects cash. Buy-and-hold is the benchmark and is not selected. A live switch needs a 2 percentage point lead.';
     let killed = null;
     let chart = null;
     let backtest = null;
@@ -467,14 +467,15 @@
     function rowHtml(row, role) {
       const cls = role === 'selected' ? 'selected' : (role === 'benchmark' ? 'benchmark' : '');
       const label = role === 'selected' ? ' <span class="pill">selected</span>' : (role === 'benchmark' ? ' <span class="pill">benchmark</span>' : '');
-      return `<tr class="${cls}"><td>${esc(row.name)}${label}</td><td class="num">${pct(row.return)}</td><td class="num">${pct(row.max_drawdown)}</td><td class="num">${esc(row.trades)}</td><td class="num">${row.score == null ? 'n/a' : Number(row.score).toFixed(4)}</td></tr>`;
+      const gross = pct(row.gross_return == null ? row.return : row.gross_return);
+      return `<tr class="${cls}"><td>${esc(row.name)}${label}</td><td class="num">${gross}</td><td class="num">${pct(row.return)}</td><td class="num">${pct(row.max_drawdown)}</td><td class="num">${esc(row.trades)}</td><td class="num">${row.score == null ? 'n/a' : Number(row.score).toFixed(4)}</td></tr>`;
     }
     function tableHtml(rows, pickName) {
       const body = rows.map(row => {
         const role = row.name === 'buy_and_hold' ? 'benchmark' : (row.name === pickName ? 'selected' : '');
         return rowHtml(row, role);
       }).join('');
-      return `<table><thead><tr><th>Strategy</th><th class="num">Return</th><th class="num">Max drawdown</th><th class="num">Trades</th><th class="num">Score <span class="tip" tabindex="0" data-tip="${esc(SCORE_TIP)}">i</span></th></tr></thead><tbody>${body || '<tr><td colspan="5">No rows</td></tr>'}</tbody></table>`;
+      return `<table><thead><tr><th>Strategy</th><th class="num">Gross return</th><th class="num">Net return</th><th class="num">Net max DD</th><th class="num">Trades</th><th class="num">Net score <span class="tip" tabindex="0" data-tip="${esc(SCORE_TIP)}">i</span></th></tr></thead><tbody>${body || '<tr><td colspan="6">No rows</td></tr>'}</tbody></table>`;
     }
     function renderTabs() {
       const tabs = [{ id: 'overall', label: 'Overall' }];
@@ -714,7 +715,10 @@
         renderRisk(health, riskState, fills);
         if (bt && bt.drawdown_penalty != null) {
           document.getElementById('formulaNote').textContent =
-            'Score = return - ' + bt.drawdown_penalty + ' x max drawdown. Higher wins. Buy-and-hold is the benchmark and is not selected.';
+            'Net score = net return - ' + bt.drawdown_penalty + ' x net max drawdown. Fee ' +
+            (bt.fee_bps ?? 10) + ' bps and slippage ' + (bt.slippage_bps ?? 5) +
+            ' bps per side. Higher wins. A negative net score selects cash. Switch margin ' +
+            (bt.switch_margin ?? 0.02) + '.';
         }
       } finally {
         refreshing = false;
