@@ -46,6 +46,9 @@
       z-index: 5;
     }
     .brand-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .nav { display: flex; gap: 6px; }
+    .nav a { color: var(--muted); text-decoration: none; font-size: .8rem; font-weight: 750; padding: 4px 8px; border-radius: 8px; }
+    .nav a[aria-current="page"], .nav a:hover { color: var(--text); background: #0c1322; }
     h1 { font-size: 1.25rem; line-height: 1.2; margin: 0; letter-spacing: -.02em; }
     .sub { margin: 6px 0 0; color: var(--muted); font-size: .82rem; }
     .paper {
@@ -234,6 +237,10 @@
         <div class="brand-row">
           <h1>Sentinel — paper-trading agent</h1>
           <span class="paper">PAPER ONLY</span>
+          <nav class="nav" aria-label="Pages">
+            <a href="/" aria-current="page">Paper</a>
+            <a href="/validation">Validation</a>
+          </nav>
         </div>
         <p class="sub" id="clock">Mock prices. No live orders.</p>
       </div>

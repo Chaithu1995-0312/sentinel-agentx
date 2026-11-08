@@ -50,3 +50,13 @@ python scripts/demo_run.py
 - [GITHUB_SETUP.md](./GITHUB_SETUP.md)
 
 Docker compose files may still exist for optional use; **primary path is uvicorn via `scripts/run_all.py`.**
+
+## Private validation (not demo data)
+
+The Validation page at http://127.0.0.1:8010/validation reads `data/validation/validation_results.json` on this machine. Real CSVs stay in `data/realdata/`. Both folders are gitignored.
+
+```bash
+python scripts/validate_real.py --csv data/realdata/YOUR.csv --symbol XAUUSD --bars H1
+```
+
+The script resamples local bars, backtests the three strategies against buy-and-hold, checks the result with pandas, and runs paper risk tests against the local services. It does not contact a broker or MT5. The page can re-run any CSV already in `data/realdata/`.
