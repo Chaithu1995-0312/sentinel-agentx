@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,9 @@ app.add_middleware(
 )
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
+if str(BUILD_ROOT) not in sys.path:
+    sys.path.insert(0, str(BUILD_ROOT))
+from shared.selection import apply_hysteresis  # noqa: E402
 MARKET_URL = os.getenv("MARKET_INGEST_URL", "http://127.0.0.1:8001")
 FAST = int(os.getenv("SMA_FAST", "5"))
 SLOW = int(os.getenv("SMA_SLOW", "15"))
@@ -32,6 +36,9 @@ BB_PERIOD = int(os.getenv("BB_PERIOD", "20"))
 BB_K = float(os.getenv("BB_K", "2"))
 # score = return - penalty * max_drawdown. Higher wins. Buy-and-hold is not a candidate.
 DD_PENALTY = float(os.getenv("STRATEGY_DD_PENALTY", "0.5"))
+FEE_BPS = float(os.getenv("FEE_BPS", "10"))
+SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))
+SWITCH_MARGIN = float(os.getenv("SWITCH_MARGIN", "0.02"))
 NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "14"))
 # Worst headline at or below this vetoes a buy. One strong word (-2) / 2 = -1.0.
 NEWS_VETO_SCORE = -0.60
@@ -177,16 +184,12 @@ def _fetch_news() -> list[dict]:
 
 
 def _sma(values: list[float], window: int) -> list[float | None]:
+    """Simple moving average. Each point is the mean of its own window so it matches pandas."""
     out: list[float | None] = [None] * len(values)
     if window <= 0:
         return out
-    s = 0.0
-    for i, v in enumerate(values):
-        s += v
-        if i >= window:
-            s -= values[i - window]
-        if i >= window - 1:
-            out[i] = s / window
+    for i in range(window - 1, len(values)):
+        out[i] = sum(values[i - window + 1 : i + 1]) / window
     return out
 
 
@@ -247,7 +250,18 @@ def _max_drawdown(equity: list[float]) -> float:
     return worst
 
 
-def _actions(strategy: str, closes: list[float], fast: int, slow: int) -> list[str]:
+def _cost_rate(fee_bps: float, slippage_bps: float) -> float:
+    return (float(fee_bps) + float(slippage_bps)) / 10000.0
+
+
+def _actions(
+    strategy: str,
+    closes: list[float],
+    fast: int,
+    slow: int,
+    bb_period: int | None = None,
+    bb_k: float | None = None,
+) -> list[str]:
     n = len(closes)
     actions = ["hold"] * n
     if strategy == "sma_crossover":
@@ -272,7 +286,9 @@ def _actions(strategy: str, closes: list[float], fast: int, slow: int) -> list[s
                 actions[i] = "sell"
         return actions
     if strategy == "bollinger_breakout":
-        mid, upper, _lower = _bollinger(closes, BB_PERIOD, BB_K)
+        period = BB_PERIOD if bb_period is None else int(bb_period)
+        width = BB_K if bb_k is None else float(bb_k)
+        mid, upper, _lower = _bollinger(closes, period, width)
         for i in range(1, n):
             if None in (mid[i], mid[i - 1], upper[i], upper[i - 1]):
                 continue
@@ -284,7 +300,20 @@ def _actions(strategy: str, closes: list[float], fast: int, slow: int) -> list[s
     raise HTTPException(400, f"unknown strategy {strategy}")
 
 
-def _simulate(closes: list[float], dates: list[str], actions: list[str], starting_cash: float) -> dict:
+def _simulate(
+    closes: list[float],
+    dates: list[str],
+    actions: list[str],
+    starting_cash: float,
+    cost_rate: float = 0.0,
+    liquidate_end: bool = False,
+) -> dict:
+    """Fill at the signal bar's close.
+
+    cost_rate is applied only to executed notional: entry notional qty*close
+    and exit notional qty*close. Flat bars pay nothing. `trades` counts fills
+    (each entry and each exit), not round trips.
+    """
     cash = float(starting_cash)
     qty = 0.0
     position = 0
@@ -292,29 +321,43 @@ def _simulate(closes: list[float], dates: list[str], actions: list[str], startin
     equity: list[float] = []
     trade_dates: list[str] = []
     trade_events: list[dict] = []
+    rate = max(0.0, float(cost_rate))
+
+    def _fill(i: int, side: str, px: float) -> None:
+        nonlocal cash, qty, position, trades
+        if side == "buy":
+            fill_px = px * (1.0 + rate)
+            qty = cash / fill_px if fill_px else 0.0
+            cash = 0.0
+            position = 1
+        else:
+            cash = qty * px * (1.0 - rate)
+            qty = 0.0
+            position = 0
+        trades += 1
+        trade_dates.append(dates[i])
+        trade_events.append({"date": dates[i], "side": side})
+
     for i, px in enumerate(closes):
         act = actions[i]
         if position == 0 and act == "buy":
-            qty = cash / px if px else 0.0
-            cash = 0.0
-            position = 1
-            trades += 1
-            trade_dates.append(dates[i])
-            trade_events.append({"date": dates[i], "side": "buy"})
+            _fill(i, "buy", px)
         elif position == 1 and act == "sell":
-            cash = qty * px
-            qty = 0.0
-            position = 0
-            trades += 1
-            trade_dates.append(dates[i])
-            trade_events.append({"date": dates[i], "side": "sell"})
+            _fill(i, "sell", px)
         equity.append(cash + qty * px)
+    if liquidate_end and position == 1 and closes:
+        _fill(len(closes) - 1, "sell", closes[-1])
+        equity[-1] = cash
+    buys = sum(1 for event in trade_events if event["side"] == "buy")
+    sells = sum(1 for event in trade_events if event["side"] == "sell")
     final = equity[-1] if equity else starting_cash
     ret = (final / starting_cash) - 1.0 if starting_cash else 0.0
     return {
         "return": ret,
         "max_drawdown": _max_drawdown(equity),
         "trades": trades,
+        "fills": trades,
+        "round_trips": min(buys, sells),
         "final_equity": final,
         "equity": equity,
         "trade_dates": trade_dates,
@@ -331,9 +374,36 @@ def _pack(name: str, sim: dict) -> dict:
         "return": ret,
         "max_drawdown": dd,
         "trades": int(sim["trades"]),
+        "fills": int(sim.get("fills", sim["trades"])),
+        "round_trips": int(sim.get("round_trips", 0)),
         "score": score,
         "final_equity": round(float(sim["final_equity"]), 2),
     }
+
+
+def _pack_costs(name: str, gross: dict, net: dict) -> dict:
+    """Selection fields (return, max_drawdown, score) are net of fee and slippage."""
+    packed = _pack(name, net)
+    gross_packed = _pack(name, gross)
+    packed.update(
+        {
+            "gross_return": gross_packed["return"],
+            "gross_max_drawdown": gross_packed["max_drawdown"],
+            "gross_score": gross_packed["score"],
+            "gross_final_equity": gross_packed["final_equity"],
+            "net_return": packed["return"],
+            "net_max_drawdown": packed["max_drawdown"],
+            "net_score": packed["score"],
+            "net_final_equity": packed["final_equity"],
+        }
+    )
+    return packed
+
+
+def _select_name(ranked: list[dict]) -> str:
+    if not ranked or float(ranked[0]["score"]) < 0:
+        return "cash"
+    return str(ranked[0]["name"])
 
 
 def _trade_phrase(n: int) -> str:
@@ -344,25 +414,28 @@ def _selection_reason(ranked: list[dict], bh: dict) -> str:
     best = ranked[0]
     parts = [
         (
-            f"Selected {best['name']} because its score {best['score']:.4f} "
+            f"Selected {best['name']} because its net score {best['score']:.4f} "
             f"is the best trading strategy. "
-            f"Score = return - {DD_PENALTY:g} * max drawdown."
+            f"Net score = net return - {DD_PENALTY:g} * net max drawdown, "
+            f"after {FEE_BPS:g} bps fee and {SLIPPAGE_BPS:g} bps slippage per side."
         ),
         (
-            f"{best['name']} return {best['return'] * 100:.2f}%, "
-            f"max drawdown {best['max_drawdown'] * 100:.2f}%, {_trade_phrase(best['trades'])}."
+            f"{best['name']} net return {best['return'] * 100:.2f}% "
+            f"(gross {best.get('gross_return', best['return']) * 100:.2f}%), "
+            f"net max drawdown {best['max_drawdown'] * 100:.2f}%, {_trade_phrase(best['trades'])}."
         ),
     ]
     for other in ranked[1:]:
         parts.append(
-            f"{other['name']} score {other['score']:.4f} "
-            f"(return {other['return'] * 100:.2f}%, "
-            f"max drawdown {other['max_drawdown'] * 100:.2f}%, "
+            f"{other['name']} net score {other['score']:.4f} "
+            f"(net return {other['return'] * 100:.2f}%, gross {other.get('gross_return', other['return']) * 100:.2f}%, "
+            f"net max drawdown {other['max_drawdown'] * 100:.2f}%, "
             f"{_trade_phrase(other['trades'])})."
         )
     parts.append(
-        f"Buy-and-hold return {bh['return'] * 100:.2f}%, "
-        f"max drawdown {bh['max_drawdown'] * 100:.2f}%, {_trade_phrase(bh['trades'])}. "
+        f"Buy-and-hold net return {bh['return'] * 100:.2f}% "
+        f"(gross {bh.get('gross_return', bh['return']) * 100:.2f}%), "
+        f"net max drawdown {bh['max_drawdown'] * 100:.2f}%, {_trade_phrase(bh['trades'])}. "
         "Buy-and-hold is the benchmark, not a candidate the agent can switch into."
     )
     return " ".join(parts)
@@ -725,23 +798,66 @@ def _window_metrics(name: str, sim: dict, dates: list[str], start: str, end: str
         ret = (series[-1] / series[0]) - 1.0 if series[0] else 0.0
         dd = _max_drawdown(series)
         final = series[-1]
-    trades = sum(1 for day in sim.get("trade_dates") or [] if start <= day <= end)
+    events = [event for event in sim.get("trade_events") or [] if start <= event["date"] <= end]
+    trades = len(events)
+    buys = sum(1 for event in events if event["side"] == "buy")
+    sells = sum(1 for event in events if event["side"] == "sell")
     packed = _pack(
         name,
-        {"return": ret, "max_drawdown": dd, "trades": trades, "final_equity": final},
+        {
+            "return": ret,
+            "max_drawdown": dd,
+            "trades": trades,
+            "fills": trades,
+            "round_trips": min(buys, sells),
+            "final_equity": final,
+        },
     )
     return packed
 
 
-def _regime_reports(sims: dict[str, dict], bh_sim: dict, dates: list[str], meta: dict) -> list[dict]:
+def _with_gross(net_row: dict, gross_row: dict) -> dict:
+    net_row = dict(net_row)
+    net_row.update(
+        {
+            "gross_return": gross_row["return"],
+            "gross_max_drawdown": gross_row["max_drawdown"],
+            "gross_score": gross_row["score"],
+            "gross_final_equity": gross_row["final_equity"],
+            "net_return": net_row["return"],
+            "net_max_drawdown": net_row["max_drawdown"],
+            "net_score": net_row["score"],
+            "net_final_equity": net_row["final_equity"],
+        }
+    )
+    return net_row
+
+
+def _regime_reports(
+    net_sims: dict[str, dict],
+    gross_sims: dict[str, dict],
+    net_bh: dict,
+    gross_bh: dict,
+    dates: list[str],
+    meta: dict,
+) -> list[dict]:
     reports = []
     for reg in meta.get("regimes") or []:
         start = str(reg.get("start") or "")
         end = str(reg.get("end") or "")
         if not start or not end:
             continue
-        rows = [_window_metrics(name, sims[name], dates, start, end) for name in STRATEGIES]
-        bh = _window_metrics("buy_and_hold", bh_sim, dates, start, end)
+        rows = [
+            _with_gross(
+                _window_metrics(name, net_sims[name], dates, start, end),
+                _window_metrics(name, gross_sims[name], dates, start, end),
+            )
+            for name in STRATEGIES
+        ]
+        bh = _with_gross(
+            _window_metrics("buy_and_hold", net_bh, dates, start, end),
+            _window_metrics("buy_and_hold", gross_bh, dates, start, end),
+        )
         ranked = _rank(rows)
         reports.append(
             {
@@ -750,10 +866,11 @@ def _regime_reports(sims: dict[str, dict], bh_sim: dict, dates: list[str], meta:
                 "end": end,
                 "bars": reg.get("bars"),
                 "label": (
-                    "MOCK regime. Return and max drawdown are measured on the continuous "
-                    "backtest inside this window, including a position carried in."
+                    "MOCK regime. Net return and net max drawdown are measured on the continuous "
+                    "backtest inside this window, including a position carried in. "
+                    "Costs are fee plus slippage on each fill."
                 ),
-                "selected_strategy": ranked[0]["name"],
+                "selected_strategy": _select_name(ranked),
                 "strategies": rows,
                 "buy_hold": bh,
             }
@@ -774,6 +891,10 @@ class BacktestRequest(BaseModel):
     fast: int = Field(default=FAST, ge=2)
     slow: int = Field(default=SLOW, ge=3)
     starting_cash: float = 100000.0
+    fee_bps: float | None = None
+    slippage_bps: float | None = None
+    current_strategy: str | None = None
+    switch_margin: float | None = None
 
 
 def _stop_defaults() -> dict:
@@ -788,9 +909,12 @@ def health():
     return {
         "service": "strategy-engine",
         "status": "ok",
-        "strategies": list(STRATEGIES),
-        "metric": "return_minus_drawdown_penalty",
+        "strategies": list(STRATEGIES) + ["cash"],
+        "metric": "net_return_minus_drawdown_penalty",
         "drawdown_penalty": DD_PENALTY,
+        "fee_bps": FEE_BPS,
+        "slippage_bps": SLIPPAGE_BPS,
+        "switch_margin": SWITCH_MARGIN,
         "sma_fast": FAST,
         "sma_slow": SLOW,
         "rsi_period": RSI_PERIOD,
@@ -800,6 +924,26 @@ def health():
 
 @app.post("/signal")
 def signal(body: SignalRequest):
+    if body.strategy == "cash":
+        bars = _bars_as_of(body.as_of_date)
+        last = bars[-1] if bars else {}
+        return {
+            "symbol": body.symbol,
+            "strategy": "cash",
+            "action": "hold",
+            "technical_action": "hold",
+            "confidence": 0.0,
+            "technical_confidence": 0.0,
+            "reason": "Net score is negative, so the book stays in cash.",
+            "technical_reason": "cash",
+            "price": last.get("close"),
+            "date": last.get("date"),
+            "news_score": 0.0,
+            "news_reason": "Cash has no technical signal.",
+            "news_changed_decision": False,
+            "size_multiplier": 0.0,
+            **_stop_defaults(),
+        }
     _check_strategy(body.strategy, body.fast, body.slow)
     bars = _bars_as_of(body.as_of_date)
     tech = _technical(body.strategy, bars, body.fast, body.slow, body.symbol)
@@ -819,31 +963,48 @@ def backtest(body: BacktestRequest):
     if len(closes) < need:
         raise HTTPException(400, "not enough bars")
 
+    fee = FEE_BPS if body.fee_bps is None else float(body.fee_bps)
+    slip = SLIPPAGE_BPS if body.slippage_bps is None else float(body.slippage_bps)
+    margin = SWITCH_MARGIN if body.switch_margin is None else float(body.switch_margin)
+    rate = _cost_rate(fee, slip)
     rows = []
     curves: dict[str, list] = {}
-    sims: dict[str, dict] = {}
+    net_sims: dict[str, dict] = {}
+    gross_sims: dict[str, dict] = {}
     for name in STRATEGIES:
         actions = _actions(name, closes, body.fast, body.slow)
-        sim = _simulate(closes, dates, actions, body.starting_cash)
-        sims[name] = sim
-        rows.append(_pack(name, sim))
+        gross = _simulate(closes, dates, actions, body.starting_cash, 0.0)
+        net = _simulate(closes, dates, actions, body.starting_cash, rate)
+        gross_sims[name] = gross
+        net_sims[name] = net
+        rows.append(_pack_costs(name, gross, net))
         curves[name] = [
-            {"date": d, "equity": round(e, 2)} for d, e in zip(dates, sim["equity"])
+            {"date": d, "equity": round(e, 2)} for d, e in zip(dates, net["equity"])
         ]
     bh_actions = ["buy"] + ["hold"] * (len(closes) - 1)
-    bh_sim = _simulate(closes, dates, bh_actions, body.starting_cash)
-    bh = _pack("buy_and_hold", bh_sim)
+    bh_gross = _simulate(closes, dates, bh_actions, body.starting_cash, 0.0)
+    bh_net = _simulate(closes, dates, bh_actions, body.starting_cash, rate)
+    bh = _pack_costs("buy_and_hold", bh_gross, bh_net)
     ranked = _rank(rows)
     best = ranked[0]
+    chosen = _select_name(ranked)
     reason = _selection_reason(ranked, bh)
+    if chosen == "cash":
+        reason = (
+            f"Best net score is {best['score']:.4f} for {best['name']}, which is negative, "
+            "so the book stays in cash. " + reason
+        )
+    elif body.current_strategy:
+        chosen, hyst = apply_hysteresis(rows, body.current_strategy, margin)
+        reason = hyst + " " + reason
     news = _fetch_news()
     example = _news_veto_example(bars, news, body.fast, body.slow, body.symbol)
     boost = _news_boost_example(bars, news, body.fast, body.slow, body.symbol)
     meta = _load_regimes()
-    regimes = _regime_reports(sims, bh_sim, dates, meta)
+    regimes = _regime_reports(net_sims, gross_sims, bh_net, bh_gross, dates, meta)
     last_day = dates[-1]
     current = next((reg for reg in regimes if reg["start"] <= last_day <= reg["end"]), None)
-    regime_strategy = (current or {}).get("selected_strategy") or best["name"]
+    regime_strategy = (current or {}).get("selected_strategy") or chosen
     veto_reason = (example or {}).get("news_reason") or ""
     scored_news = []
     for item in news:
@@ -862,40 +1023,52 @@ def backtest(body: BacktestRequest):
                 and scored["score"] <= NEWS_VETO_SCORE,
             }
         )
+    shown = best if chosen == "cash" else next(row for row in rows if row["name"] == chosen)
     summary = (
-        f"Selected {best['name']} score {best['score']:.4f} "
-        f"(return {best['return'] * 100:.2f}%, max drawdown {best['max_drawdown'] * 100:.2f}%, "
-        f"{_trade_phrase(best['trades'])}). "
-        f"Buy-and-hold return {bh['return'] * 100:.2f}%, "
-        f"max drawdown {bh['max_drawdown'] * 100:.2f}%, {_trade_phrase(bh['trades'])}."
+        f"Selected {chosen} net score {shown['score']:.4f} "
+        f"(net return {shown['return'] * 100:.2f}%, gross {shown['gross_return'] * 100:.2f}%, "
+        f"net max drawdown {shown['max_drawdown'] * 100:.2f}%, {_trade_phrase(shown['trades'])}). "
+        f"Buy-and-hold net return {bh['return'] * 100:.2f}%, gross {bh['gross_return'] * 100:.2f}%, "
+        f"net max drawdown {bh['max_drawdown'] * 100:.2f}%, {_trade_phrase(bh['trades'])}. "
+        f"Costs are {fee:g} bps fee plus {slip:g} bps slippage per side."
     )
+    curve_name = best["name"] if chosen == "cash" else chosen
     return {
         "symbol": body.symbol,
-        "metric": "return_minus_drawdown_penalty",
+        "metric": "net_return_minus_drawdown_penalty",
         "drawdown_penalty": DD_PENALTY,
-        "metric_note": "score = return - drawdown_penalty * max_drawdown; higher wins; buy-and-hold is the benchmark only",
-        "selected_strategy": best["name"],
+        "fee_bps": fee,
+        "slippage_bps": slip,
+        "switch_margin": margin,
+        "metric_note": "net score = net return - drawdown_penalty * net max drawdown; costs are fee_bps + slippage_bps per side; higher wins; a negative net score selects cash; buy-and-hold is the benchmark only",
+        "selected_strategy": chosen,
+        "unconstrained_strategy": _select_name(ranked),
         "selection_reason": reason,
-        "strategy": best["name"],
-        "strategy_return": best["return"],
-        "max_drawdown": best["max_drawdown"],
-        "trades": best["trades"],
-        "final_equity": best["final_equity"],
+        "strategy": chosen,
+        "strategy_return": shown["return"],
+        "gross_return": shown["gross_return"],
+        "net_return": shown["net_return"],
+        "max_drawdown": shown["max_drawdown"],
+        "gross_max_drawdown": shown["gross_max_drawdown"],
+        "trades": shown["trades"],
+        "final_equity": shown["final_equity"],
         "buy_hold_return": bh["return"],
+        "buy_hold_gross_return": bh["gross_return"],
         "buy_hold_max_drawdown": bh["max_drawdown"],
+        "buy_hold_gross_max_drawdown": bh["gross_max_drawdown"],
         "buy_hold_trades": bh["trades"],
         "buy_hold_final": bh["final_equity"],
-        "outperformance": round(best["return"] - bh["return"], 6),
+        "outperformance": round(shown["return"] - bh["return"], 6),
         "starting_cash": body.starting_cash,
         "bars": len(closes),
         "news_in_backtest": False,
         "strategies": rows,
         "buy_hold": bh,
-        "equity_curve": curves[best["name"]],
-        "trade_markers": sims[best["name"]].get("trade_events") or [],
+        "equity_curve": curves[curve_name] if chosen != "cash" else [{"date": d, "equity": body.starting_cash} for d in dates],
+        "trade_markers": [] if chosen == "cash" else net_sims[curve_name].get("trade_events") or [],
         "scored_news": scored_news,
         "buy_hold_curve": [
-            {"date": d, "equity": round(e, 2)} for d, e in zip(dates, bh_sim["equity"])
+            {"date": d, "equity": round(e, 2)} for d, e in zip(dates, bh_net["equity"])
         ],
         "summary": summary,
         "mock_label": meta.get("label") or "",

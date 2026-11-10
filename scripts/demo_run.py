@@ -55,6 +55,9 @@ def pp(label: str, data) -> None:
 
 
 def main() -> int:
+    choice = ROOT / "data" / "strategy_choice.json"
+    if choice.exists():
+        choice.unlink()
     wait_ready()
     failures = []
 
