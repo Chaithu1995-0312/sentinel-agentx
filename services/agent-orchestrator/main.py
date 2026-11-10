@@ -94,6 +94,80 @@ def tool_journal(client: httpx.Client, payload: dict[str, Any]) -> dict[str, Any
     return client.post(f"{JOURNAL_URL}/trade", json=payload).json()
 
 
+def tool_evaluate_exits(client: httpx.Client, symbol: str, price: float, dry_run: bool) -> dict[str, Any]:
+    r = client.post(
+        f"{BROKER_URL}/evaluate-exits",
+        json={"symbol": symbol, "price": price, "dry_run": dry_run},
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def tool_daily_pnl(client: httpx.Client, symbol: str, price: float) -> dict[str, Any]:
+    r = client.get(f"{BROKER_URL}/daily-pnl", params={"symbol": symbol, "price": price})
+    r.raise_for_status()
+    return r.json()
+
+
+TRADE_GOALS = ("paper_cycle", "trade", "status_and_trade")
+
+
+def _exit_journal(fill: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    trigger = fill.get("reason")
+    price = fill.get("price")
+    entry = fill.get("entry_price")
+    pnl = float(fill.get("realized_pnl") or 0.0)
+    if trigger == "stop_loss":
+        title = "Stop-loss hit - position closed"
+        why = (
+            f"Price {price} fell to or below the stop-loss {fill.get('stop_loss')} "
+            f"set when we bought at about {entry}"
+        )
+    else:
+        title = "Take-profit hit - position closed"
+        why = (
+            f"Price {price} rose to or above the take-profit {fill.get('take_profit')} "
+            f"set when we bought at about {entry}"
+        )
+    verb = "would close" if dry_run else "closed"
+    if dry_run:
+        title = f"Dry-run: {title}"
+    return {
+        "title": title,
+        "symbol": fill.get("symbol"),
+        "side": "sell",
+        "action": "close the position",
+        "qty": fill.get("qty"),
+        "price": price,
+        "stop_loss": fill.get("stop_loss"),
+        "take_profit": fill.get("take_profit"),
+        "reason": (
+            f"{why}, so the agent {verb} the whole position on paper. "
+            f"Paper P&L on this position {pnl:+.2f}. Exits only reduce risk, so they run "
+            "even when the kill switch is ON and do not count toward the 10 trades a day"
+        ),
+        "tags": ["exit", str(trigger), "paper"] + (["dry_run"] if dry_run else []),
+        "extra": {"fill_id": fill.get("fill_id"), "trigger": trigger},
+    }
+
+
+def _process_exits(client: httpx.Client, symbol: str, dry_run: bool, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Before any new signal: close open positions whose stop or take-profit was reached."""
+    market = tool_get_market(client, symbol)
+    last = market.get("last") or {}
+    price = last.get("close")
+    if not price:
+        steps.append({"tool": "evaluate_exits", "result": {"skipped": "no price"}})
+        return []
+    res = tool_evaluate_exits(client, symbol, float(price), dry_run)
+    exits = list(res.get("exits") or [])
+    steps.append({"tool": "evaluate_exits", "result": {"price": float(price), "exits": exits}})
+    for fill in exits:
+        j = tool_journal(client, _exit_journal(fill, dry_run))
+        steps.append({"tool": "journal_exit", "result": {"id": j.get("id"), "body": j.get("body")}})
+    return exits
+
+
 def _trade_phrase(n: int) -> str:
     return f"{n} trade" if int(n) == 1 else f"{n} trades"
 
@@ -308,14 +382,27 @@ def health():
 
 @app.post("/run")
 def run(body: RunRequest):
-    """Deterministic tool loop: market -> backtest -> select -> signal -> risk -> order -> journal."""
+    """Deterministic tool loop: exits -> market -> backtest -> select -> signal -> risk -> order -> journal."""
+    result = _run_cycle(body)
+    exits: list[dict[str, Any]] = []
+    for step in result.get("steps") or []:
+        if step.get("tool") == "evaluate_exits":
+            exits.extend((step.get("result") or {}).get("exits") or [])
+    result["exits"] = exits
+    return result
+
+
+def _run_cycle(body: RunRequest) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
     symbol = body.symbol
 
     with _client() as client:
         kill = tool_kill(client)
         steps.append({"tool": "get_kill_switch", "result": kill})
-        if kill.get("killed") and body.goal in ("paper_cycle", "trade", "status_and_trade"):
+        if body.goal in TRADE_GOALS:
+            # Risk-reducing exits run first, even with the kill switch ON.
+            _process_exits(client, symbol, body.dry_run, steps)
+        if kill.get("killed") and body.goal in TRADE_GOALS:
             market = tool_get_market(client, symbol)
             steps.append({"tool": "get_market", "result": {"last": market.get("last")}})
             bt = tool_run_backtest(client, symbol)
@@ -509,6 +596,19 @@ def run(body: RunRequest):
         for p in (account.get("positions") or {}).values():
             open_notional += float(p.get("qty", 0)) * float(p.get("avg_price", 0))
 
+        # True daily loss: today's realized P&L + unrealized on open positions,
+        # against start-of-day equity. If the broker can't answer, risk-guard
+        # falls back to its own date-reset realized P&L for today.
+        daily_pnl = None
+        day_start_equity = None
+        try:
+            daily = tool_daily_pnl(client, symbol, price)
+            steps.append({"tool": "get_daily_pnl", "result": daily})
+            daily_pnl = float(daily["daily_pnl"])
+            day_start_equity = float(daily["day_start_equity"])
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            steps.append({"tool": "get_daily_pnl", "result": {"error": "unavailable"}})
+
         risk_payload = {
             "symbol": symbol,
             "side": action,
@@ -518,7 +618,8 @@ def run(body: RunRequest):
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "open_notional": open_notional,
-            "daily_pnl": float(account.get("realized_pnl") or 0),
+            "daily_pnl": daily_pnl,
+            "day_start_equity": day_start_equity,
         }
         risk = tool_check_risk(client, risk_payload)
         steps.append({"tool": "check_risk", "result": risk})

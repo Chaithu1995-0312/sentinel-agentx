@@ -103,10 +103,14 @@ class OrderCheck(BaseModel):
     take_profit: float | None = None
     daily_pnl: float | None = None
     open_notional: float | None = None
+    # Start-of-day equity for the daily loss limit (falls back to equity).
+    day_start_equity: float | None = None
 
 
 class TradeRecord(BaseModel):
     realized_pnl: float = 0.0
+    # Stop-loss / take-profit exits reduce risk and do not use the daily trade cap.
+    count_trade: bool = True
 
 
 @app.on_event("startup")
@@ -152,7 +156,10 @@ def get_state():
 def record_trade(body: TradeRecord):
     """Called by broker/orchestrator after a fill to update daily counters."""
     state = _load_state()
-    state["trades_today"] = int(state.get("trades_today", 0)) + 1
+    if body.count_trade:
+        state["trades_today"] = int(state.get("trades_today", 0)) + 1
+    else:
+        state["exits_today"] = int(state.get("exits_today", 0)) + 1
     state["realized_pnl_today"] = float(state.get("realized_pnl_today", 0.0)) + float(
         body.realized_pnl
     )
@@ -201,11 +208,12 @@ def check_order(body: OrderCheck):
         if body.daily_pnl is not None
         else float(state.get("realized_pnl_today", 0.0))
     )
-    if daily_pnl <= -DAILY_LOSS_LIMIT * equity:
+    loss_base = float(body.day_start_equity) if body.day_start_equity else equity
+    if daily_pnl <= -DAILY_LOSS_LIMIT * loss_base:
         return {
             "allowed": False,
             "reason": "daily_loss_limit",
-            "detail": f"daily_pnl={daily_pnl:.2f} breached -{DAILY_LOSS_LIMIT * equity:.2f}",
+            "detail": f"daily_pnl={daily_pnl:.2f} breached -{DAILY_LOSS_LIMIT * loss_base:.2f}",
             "order": body.model_dump(),
         }
 
