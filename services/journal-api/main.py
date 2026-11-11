@@ -7,17 +7,21 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="sentinel-journal-api", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+from shared.state_io import append_line, lock_for, write_text_atomic  # noqa: E402
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
 TOKEN_CAP = int(os.getenv("LLM_DAILY_TOKEN_CAP", "50000"))
@@ -50,9 +54,8 @@ def _load_entries() -> list[dict]:
 
 
 def _append(row: dict) -> None:
-    path = _journal_path()
-    with path.open("a") as f:
-        f.write(json.dumps(row) + "\n")
+    # Append-only, one JSON object per line, under a lock, fsynced.
+    append_line(_journal_path(), json.dumps(row))
 
 
 def _sentence(text: str) -> str:
@@ -150,7 +153,7 @@ def list_entries(limit: int = 50):
     return {"entries": rows[-limit:], "count": len(rows)}
 
 
-@app.post("/entries")
+@app.post("/entries", dependencies=[Depends(require_key)])
 def add_entry(body: Entry):
     text = body.body or _template_body(body.structured)
     row = {
@@ -165,7 +168,7 @@ def add_entry(body: Entry):
     return row
 
 
-@app.post("/trade")
+@app.post("/trade", dependencies=[Depends(require_key)])
 def add_trade(body: TradeJournal):
     structured = {
         "symbol": body.symbol,
@@ -201,9 +204,11 @@ def add_trade(body: TradeJournal):
     return row
 
 
-@app.delete("/entries")
+@app.delete("/entries", dependencies=[Depends(require_key)])
 def clear_entries():
+    """Demo reset only (used by demo_check); the agent never calls it."""
     path = _journal_path()
-    if path.exists():
-        path.write_text("")
+    with lock_for(path):
+        if path.exists():
+            write_text_atomic(path, "")
     return {"status": "cleared"}

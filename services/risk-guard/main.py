@@ -7,17 +7,21 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="sentinel-risk-guard", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+from shared.state_io import lock_for, write_json_atomic  # noqa: E402
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
 
@@ -65,7 +69,7 @@ def _save_kill(killed: bool) -> None:
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "note": "human-controlled; agent cannot bypass",
     }
-    KILL_PATH.write_text(json.dumps(payload, indent=2))
+    write_json_atomic(KILL_PATH, payload)
 
 
 def _load_state() -> dict[str, Any]:
@@ -85,8 +89,7 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2))
+    write_json_atomic(STATE_PATH, state)
 
 
 class KillBody(BaseModel):
@@ -140,10 +143,11 @@ def get_kill():
     return {"killed": _load_kill(), "path": str(KILL_PATH)}
 
 
-@app.post("/kill-switch")
+@app.post("/kill-switch", dependencies=[Depends(require_key)])
 def set_kill(body: KillBody):
     # Human endpoint only — agent must not call this to clear.
-    _save_kill(body.killed)
+    with lock_for(KILL_PATH):
+        _save_kill(body.killed)
     return {"killed": body.killed, "path": str(KILL_PATH)}
 
 
@@ -152,9 +156,14 @@ def get_state():
     return _load_state()
 
 
-@app.post("/record-trade")
+@app.post("/record-trade", dependencies=[Depends(require_key)])
 def record_trade(body: TradeRecord):
     """Called by broker/orchestrator after a fill to update daily counters."""
+    with lock_for(STATE_PATH):
+        return _record_trade_locked(body)
+
+
+def _record_trade_locked(body: TradeRecord) -> dict[str, Any]:
     state = _load_state()
     if body.count_trade:
         state["trades_today"] = int(state.get("trades_today", 0)) + 1

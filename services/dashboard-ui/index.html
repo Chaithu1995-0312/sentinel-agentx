@@ -239,7 +239,6 @@
           <span class="paper">PAPER ONLY</span>
           <nav class="nav" aria-label="Pages">
             <a href="/" aria-current="page">Paper</a>
-            <a href="/validation">Validation</a>
           </nav>
         </div>
         <p class="sub" id="clock">Mock prices. No live orders.</p>
@@ -361,8 +360,20 @@
       if (!r.ok) throw new Error(r.status + ' ' + url);
       return r.json();
     }
+    // Optional API key (only needed when SENTINEL_API_KEY is set on the services).
+    // Open the dashboard once as /?key=YOUR_KEY to store it in this browser.
+    (function () {
+      const k = new URLSearchParams(location.search).get('key');
+      if (k) { localStorage.setItem('sentinelKey', k); history.replaceState(null, '', location.pathname); }
+    })();
+    function keyHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      const k = localStorage.getItem('sentinelKey');
+      if (k) h['X-Sentinel-Key'] = k;
+      return h;
+    }
     async function postJson(url, body) {
-      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const r = await fetch(url, { method: 'POST', headers: keyHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
       if (!r.ok) throw new Error(r.status + ' ' + url);
       return r.json();
     }
@@ -461,7 +472,7 @@
       const live = bt.regime_strategy || bt.selected_strategy || 'n/a';
       document.getElementById('kpiStrat').textContent = String(bt.selected_strategy || 'n/a').replaceAll('_', ' ');
       document.getElementById('kpiRegime').textContent =
-        'Regime ' + (bt.current_regime || 'n/a') + ' · live signal ' + String(live).replaceAll('_', ' ');
+        'Live pick on trailing ' + ((bt.live_window || {}).bars || 'n/a') + ' bars · ' + String(live).replaceAll('_', ' ') + ' (mock regime label: ' + (bt.current_regime || 'n/a') + ')';
     }
 
     function rowHtml(row, role) {

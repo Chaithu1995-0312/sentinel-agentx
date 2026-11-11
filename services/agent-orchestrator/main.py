@@ -2,23 +2,29 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(title="sentinel-agent-orchestrator", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 CAP = int(os.getenv("LLM_DAILY_TOKEN_CAP", "50000"))
 _tokens_used = 0
@@ -48,14 +54,20 @@ class RunRequest(BaseModel):
     force_qty: float | None = None
 
 
+RUN_LOCK = threading.Lock()  # one /run at a time: two cycles can't both fill
+RUN_LOCK_WAIT = float(os.getenv("RUN_LOCK_WAIT_SECONDS", "30"))
+AUTORUN_SECONDS = float(os.getenv("SENTINEL_AUTORUN_SECONDS", "0"))  # 0 = off
+_autorun = {"enabled": AUTORUN_SECONDS > 0, "interval_s": AUTORUN_SECONDS, "last_status": None, "last_at": None, "runs": 0}
+
+
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=15.0)
+    return httpx.Client(timeout=15.0, headers=auth_headers())
 
 
 def tool_get_market(client: httpx.Client, symbol: str) -> dict[str, Any]:
     bars = client.get(f"{MARKET_URL}/bars", params={"limit": 60, "symbol": symbol}).json()
     news = client.get(f"{MARKET_URL}/news", params={"limit": 5}).json()
-    last = bars["bars"][-1] if bars.get("bars") else None
+    last = bars["bars"][-1] if bars.get("bars") else None  # includes date/open/high/low/close
     return {"bars_count": bars.get("count"), "last": last, "news": news.get("items", [])}
 
 
@@ -78,8 +90,9 @@ def tool_kill(client: httpx.Client) -> dict[str, Any]:
     return client.get(f"{RISK_URL}/kill-switch").json()
 
 
-def tool_account(client: httpx.Client) -> dict[str, Any]:
-    return client.get(f"{BROKER_URL}/account").json()
+def tool_account(client: httpx.Client, symbol: str | None = None, price: float | None = None) -> dict[str, Any]:
+    params = {"symbol": symbol, "price": price} if symbol and price else None
+    return client.get(f"{BROKER_URL}/account", params=params).json()
 
 
 def tool_check_risk(client: httpx.Client, payload: dict[str, Any]) -> dict[str, Any]:
@@ -91,13 +104,30 @@ def tool_place_order(client: httpx.Client, payload: dict[str, Any]) -> dict[str,
 
 
 def tool_journal(client: httpx.Client, payload: dict[str, Any]) -> dict[str, Any]:
-    return client.post(f"{JOURNAL_URL}/trade", json=payload).json()
+    # A journal outage must not crash a cycle after a fill; report it instead.
+    try:
+        r = client.post(f"{JOURNAL_URL}/trade", json=payload)
+        r.raise_for_status()
+        return r.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"id": None, "error": f"journal unavailable: {exc.__class__.__name__}"}
 
 
-def tool_evaluate_exits(client: httpx.Client, symbol: str, price: float, dry_run: bool) -> dict[str, Any]:
+def tool_evaluate_exits(
+    client: httpx.Client, symbol: str, price: float, dry_run: bool, bar: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    bar = bar or {}
     r = client.post(
         f"{BROKER_URL}/evaluate-exits",
-        json={"symbol": symbol, "price": price, "dry_run": dry_run},
+        json={
+            "symbol": symbol,
+            "price": price,
+            "dry_run": dry_run,
+            "bar_date": bar.get("date"),
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+        },
     )
     r.raise_for_status()
     return r.json()
@@ -159,7 +189,7 @@ def _process_exits(client: httpx.Client, symbol: str, dry_run: bool, steps: list
     if not price:
         steps.append({"tool": "evaluate_exits", "result": {"skipped": "no price"}})
         return []
-    res = tool_evaluate_exits(client, symbol, float(price), dry_run)
+    res = tool_evaluate_exits(client, symbol, float(price), dry_run, last)
     exits = list(res.get("exits") or [])
     steps.append({"tool": "evaluate_exits", "result": {"price": float(price), "exits": exits}})
     for fill in exits:
@@ -248,10 +278,13 @@ def pick_strategy(bt: dict[str, Any]) -> tuple[str, str]:
 
 
 def pick_live_strategy(bt: dict[str, Any]) -> tuple[str, str]:
-    """Re-select inside the current mock regime with the same score. Falls back to the full-sample winner."""
+    """Re-select on the trailing window (bt["live_window"]) with the same score.
+
+    Uses only the last N bars up to today, never the mock generator's regime
+    labels. Falls back to the full-sample winner.
+    """
     penalty = float(bt.get("drawdown_penalty", 0.5))
-    current = bt.get("current_regime")
-    match = next((reg for reg in bt.get("regimes") or [] if reg.get("name") == current), None)
+    match = bt.get("live_window")
     rows = list((match or {}).get("strategies") or [])
     fallback = str(bt.get("selected_strategy") or bt.get("regime_strategy") or "")
     if not match or not rows:
@@ -269,14 +302,14 @@ def pick_live_strategy(bt: dict[str, Any]) -> tuple[str, str]:
     choice, hyst = apply_hysteresis(ranked, _load_choice(), float(bt.get("switch_margin") or SWITCH_MARGIN))
     _save_choice(choice)
     note = (
-        f"Current mock regime {current} ({match.get('start')} to {match.get('end')}) "
+        f"Trailing {match.get('bars')} bars ({match.get('start')} to {match.get('end')}) "
         f"ranks {raw_name} first on net score {score:.4f} "
         f"(net return {float(best['return']) * 100:.2f}%, "
         f"gross {float(best.get('gross_return', best['return'])) * 100:.2f}%, "
         f"net max drawdown {float(best['max_drawdown']) * 100:.2f}%, "
         f"{_trade_phrase(best['trades'])}). "
         f"{hyst} "
-        f"Buy-and-hold in this regime net return {float(bh.get('return') or 0) * 100:.2f}% "
+        f"Buy-and-hold in this window net return {float(bh.get('return') or 0) * 100:.2f}% "
         f"with net max drawdown {float(bh.get('max_drawdown') or 0) * 100:.2f}%."
     )
     return choice, note
@@ -307,6 +340,9 @@ def _bt_brief(bt: dict[str, Any], chosen: str) -> dict[str, Any]:
         },
         "current_regime": bt.get("current_regime"),
         "regime_strategy": bt.get("regime_strategy"),
+        "live_window": {
+            k: (bt.get("live_window") or {}).get(k) for k in ("bars", "start", "end", "selected_strategy", "label")
+        },
         "regimes": [
             {
                 "name": reg.get("name"),
@@ -356,9 +392,12 @@ def _sized_qty(equity: float, price: float, mult: float, force_qty: float | None
     if force_qty is not None:
         return force_qty
     raw = (equity * MAX_POS * max(mult, 0.0)) / price if price else 0.0
+    # Round DOWN to 4 dp: rounding to nearest can land a hair over the 5% cap
+    # (e.g. 39.5883 x 126.3 = 5000.002 on 100,000) and get the order denied.
+    floored = math.floor(raw * 10000) / 10000
     if mult < 1:
-        return round(max(raw, 0.0001), 4)
-    return max(1.0, round(raw, 4))
+        return max(floored, 0.0001)
+    return max(1.0, floored)
 
 
 @app.get("/health")
@@ -380,10 +419,41 @@ def health():
     }
 
 
-@app.post("/run")
+@app.get("/autopilot")
+def autopilot_status():
+    return dict(_autorun)
+
+
+def _autopilot_loop() -> None:
+    while True:
+        time.sleep(AUTORUN_SECONDS)
+        try:
+            out = run(RunRequest())
+            _autorun["last_status"] = out.get("status")
+        except Exception as exc:  # keep the timer alive; report the error
+            _autorun["last_status"] = f"error: {exc.__class__.__name__}"
+        _autorun["last_at"] = time.time()
+        _autorun["runs"] += 1
+
+
+@app.on_event("startup")
+def _start_autopilot() -> None:
+    if AUTORUN_SECONDS > 0:
+        threading.Thread(target=_autopilot_loop, name="sentinel-autopilot", daemon=True).start()
+
+
+@app.post("/run", dependencies=[Depends(require_key)])
 def run(body: RunRequest):
-    """Deterministic tool loop: exits -> market -> backtest -> select -> signal -> risk -> order -> journal."""
-    result = _run_cycle(body)
+    """Deterministic tool loop: exits -> market -> backtest -> select -> signal -> risk -> order -> journal.
+
+    Serialised by RUN_LOCK so two concurrent cycles cannot both act on the same book.
+    """
+    if not RUN_LOCK.acquire(timeout=RUN_LOCK_WAIT):
+        raise HTTPException(409, "another /run cycle is still in progress")
+    try:
+        result = _run_cycle(body)
+    finally:
+        RUN_LOCK.release()
     exits: list[dict[str, Any]] = []
     for step in result.get("steps") or []:
         if step.get("tool") == "evaluate_exits":
@@ -544,10 +614,11 @@ def _run_cycle(body: RunRequest) -> dict[str, Any]:
                 "steps": steps,
             }
 
-        account = tool_account(client)
+        price = float(sig["price"])
+        # Equity marked to the latest price, not at cost.
+        account = tool_account(client, symbol, price)
         steps.append({"tool": "get_account", "result": account})
         equity = float(account.get("equity") or account.get("cash") or 100000)
-        price = float(sig["price"])
         action = sig["action"]
         mult = 1.0 if sig.get("size_multiplier") is None else float(sig["size_multiplier"])
 
@@ -702,7 +773,8 @@ def _run_cycle(body: RunRequest) -> dict[str, Any]:
             "side": action,
             "qty": qty,
             "price": price,
-            "risk_allowed": True,
+            "risk_allowed": True,  # broker re-verifies with risk-guard anyway
+            "bar_date": sig.get("date"),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "reason": sig.get("reason"),

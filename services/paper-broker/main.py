@@ -1,8 +1,15 @@
-"""paper-broker — simulated fills only. Requires risk_allowed. Tracks cash/positions/PnL."""
+"""paper-broker — simulated fills only. Paper venue, mock prices.
+
+Every order is re-verified with risk-guard /check-order using the broker's own
+book (equity, open exposure, today's P&L); the caller's risk_allowed flag is
+necessary but never sufficient. State is written atomically under a lock, so
+concurrent requests cannot double-fill or lose an update.
+"""
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import date, datetime
@@ -10,24 +17,33 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="sentinel-paper-broker", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="sentinel-paper-broker", version="0.3.0")
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+from shared.state_io import write_json_atomic  # noqa: E402
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
 STARTING_CASH = float(os.getenv("PAPER_STARTING_CASH", "100000"))
 RISK_URL = os.getenv("RISK_GUARD_URL", "http://127.0.0.1:8003")
+# Same cost model as the backtest: fee on notional + slippage against us.
+FEE_BPS = float(os.getenv("PAPER_FEE_BPS", os.getenv("FEE_BPS", "10")))
+SLIPPAGE_BPS = float(os.getenv("PAPER_SLIPPAGE_BPS", os.getenv("SLIPPAGE_BPS", "5")))
 STATE_PATH = Path(os.getenv("BROKER_STATE_PATH", str(BUILD_ROOT / "data" / "broker_state.json")))
 if not STATE_PATH.is_absolute():
     STATE_PATH = (BUILD_ROOT / STATE_PATH).resolve()
+
+_LOCK = threading.RLock()  # one book per process; serialises read-modify-write
 
 
 def _today() -> str:
@@ -42,7 +58,7 @@ def _fill_day(ts: float) -> str:
 def _empty_state() -> dict[str, Any]:
     return {
         "cash": STARTING_CASH,
-        "positions": {},  # symbol -> {qty, avg_price, stop_loss?, take_profit?}
+        "positions": {},  # symbol -> {qty, avg_price, stop_loss?, take_profit?, entry_bar?}
         "fills": [],
         "realized_pnl": 0.0,
         "day": _today(),
@@ -64,25 +80,24 @@ def _roll_day(state: dict[str, Any]) -> bool:
 
 
 def _load() -> dict[str, Any]:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not STATE_PATH.exists():
-        state = _empty_state()
-        _save(state)
+    with _LOCK:
+        if not STATE_PATH.exists():
+            state = _empty_state()
+            _save(state)
+            return state
+        try:
+            state = json.loads(STATE_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            state = _empty_state()
+            _save(state)
+            return state
+        if _roll_day(state):
+            _save(state)
         return state
-    try:
-        state = json.loads(STATE_PATH.read_text())
-    except (json.JSONDecodeError, OSError):
-        state = _empty_state()
-        _save(state)
-        return state
-    if _roll_day(state):
-        _save(state)
-    return state
 
 
 def _save(state: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2))
+    write_json_atomic(STATE_PATH, state)
 
 
 def _equity(state: dict[str, Any], marks: dict[str, float] | None = None) -> float:
@@ -94,6 +109,14 @@ def _equity(state: dict[str, Any], marks: dict[str, float] | None = None) -> flo
     return eq
 
 
+def _costs(side: str, price: float, qty: float) -> tuple[float, float]:
+    """Executed price after slippage, and fee on executed notional."""
+    slip = SLIPPAGE_BPS / 10000.0
+    px = price * (1 + slip) if side == "buy" else price * (1 - slip)
+    fee = abs(qty * px) * FEE_BPS / 10000.0
+    return round(px, 6), round(fee, 4)
+
+
 class OrderRequest(BaseModel):
     symbol: str
     side: str
@@ -103,24 +126,40 @@ class OrderRequest(BaseModel):
     stop_loss: float | None = None
     take_profit: float | None = None
     reason: str | None = None
+    bar_date: str | None = None  # date of the bar the price came from
 
 
 class ExitCheck(BaseModel):
     symbol: str
-    price: float = Field(gt=0)
+    price: float = Field(gt=0)  # latest close
     dry_run: bool = False
+    bar_date: str | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
 
 
 def _record_trade(realized: float, count_trade: bool) -> None:
     """Tell risk-guard about a fill (best-effort)."""
     try:
-        with httpx.Client(timeout=3.0) as client:
+        with httpx.Client(timeout=3.0, headers=auth_headers()) as client:
             client.post(
                 f"{RISK_URL}/record-trade",
                 json={"realized_pnl": realized, "count_trade": count_trade},
             )
     except httpx.HTTPError:
         pass
+
+
+def _risk_check(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ask risk-guard. Fail closed if it is unreachable or answers badly."""
+    try:
+        with httpx.Client(timeout=3.0, headers=auth_headers()) as client:
+            r = client.post(f"{RISK_URL}/check-order", json=payload)
+            r.raise_for_status()
+            return r.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(503, "risk-guard unreachable — fail-closed")
 
 
 def _daily(state: dict[str, Any], marks: dict[str, float]) -> dict[str, Any]:
@@ -164,17 +203,22 @@ def health():
         "fills": len(state["fills"]),
         "realized_pnl": state["realized_pnl"],
         "equity": _equity(state),
+        "fee_bps": FEE_BPS,
+        "slippage_bps": SLIPPAGE_BPS,
     }
 
 
 @app.get("/account")
-def account():
+def account(symbol: str | None = None, price: float | None = None):
+    """Equity at cost, or marked to market when ?symbol=&price= is given."""
     state = _load()
+    marks = {symbol: float(price)} if symbol and price else {}
     return {
         "cash": state["cash"],
         "positions": state["positions"],
         "realized_pnl": state["realized_pnl"],
-        "equity": _equity(state),
+        "equity": _equity(state, marks),
+        "equity_basis": "marked" if marks else "cost",
         "fills_count": len(state["fills"]),
     }
 
@@ -193,108 +237,144 @@ def daily_pnl(symbol: str | None = None, price: float | None = None):
     return _daily(state, marks)
 
 
-@app.post("/evaluate-exits")
+def _exit_trigger(pos: dict[str, Any], body: ExitCheck) -> tuple[str | None, float]:
+    """Return (trigger, fill price before slippage).
+
+    On a bar after entry we use its low/high, so an intraday touch counts. If the
+    bar opened beyond the level (a gap) we fill at the open, not the level. If a
+    bar touched both, we assume the stop came first (conservative). On the entry
+    bar itself only the close is used, because its range happened before entry.
+    """
+    stop = pos.get("stop_loss")
+    tp = pos.get("take_profit")
+    after_entry = bool(body.bar_date and pos.get("entry_bar") and body.bar_date > pos["entry_bar"])
+    if after_entry and body.low is not None and body.high is not None:
+        if stop is not None and body.low <= float(stop):
+            gap = body.open is not None and body.open <= float(stop)
+            return "stop_loss", float(body.open) if gap else float(stop)
+        if tp is not None and body.high >= float(tp):
+            gap = body.open is not None and body.open >= float(tp)
+            return "take_profit", float(body.open) if gap else float(tp)
+        return None, body.price
+    if stop is not None and body.price <= float(stop):
+        return "stop_loss", body.price
+    if tp is not None and body.price >= float(tp):
+        return "take_profit", body.price
+    return None, body.price
+
+
+@app.post("/evaluate-exits", dependencies=[Depends(require_key)])
 def evaluate_exits(body: ExitCheck):
     """Close an open long when the price reaches its stop-loss or take-profit.
 
     Exits only reduce risk, so they are allowed while the kill switch is ON and
-    are not counted against the daily trade cap. Paper fills at the given price.
+    are not counted against the daily trade cap.
     """
-    state = _load()
-    pos = state.get("positions", {}).get(body.symbol)
-    if not pos:
-        return {"symbol": body.symbol, "price": body.price, "exits": [], "position": None}
-    stop = pos.get("stop_loss")
-    tp = pos.get("take_profit")
-    trigger = None
-    if stop is not None and body.price <= float(stop):
-        trigger = "stop_loss"
-    elif tp is not None and body.price >= float(tp):
-        trigger = "take_profit"
-    if trigger is None:
-        return {"symbol": body.symbol, "price": body.price, "exits": [], "position": pos}
+    with _LOCK:
+        state = _load()
+        pos = state.get("positions", {}).get(body.symbol)
+        if not pos:
+            return {"symbol": body.symbol, "price": body.price, "exits": [], "position": None}
+        trigger, raw_px = _exit_trigger(pos, body)
+        if trigger is None:
+            return {"symbol": body.symbol, "price": body.price, "exits": [], "position": pos}
 
-    qty = float(pos["qty"])
-    avg = float(pos["avg_price"])
-    level = float(stop if trigger == "stop_loss" else tp)
-    fill = {
-        "fill_id": str(uuid.uuid4()),
-        "symbol": body.symbol,
-        "side": "sell",
-        "qty": qty,
-        "price": body.price,
-        "notional": round(qty * body.price, 2),
-        "realized_pnl": round((body.price - avg) * qty, 4),
-        "stop_loss": stop,
-        "take_profit": tp,
-        "reason": trigger,
-        "trigger_level": level,
-        "entry_price": avg,
-        "ts": time.time(),
-        "venue": "paper",
-    }
-    if body.dry_run:
-        return {"symbol": body.symbol, "price": body.price, "exits": [fill], "dry_run": True, "position": pos}
+        qty = float(pos["qty"])
+        avg = float(pos["avg_price"])
+        px, fee = _costs("sell", raw_px, qty)
+        stop, tp = pos.get("stop_loss"), pos.get("take_profit")
+        fill = {
+            "fill_id": str(uuid.uuid4()),
+            "symbol": body.symbol,
+            "side": "sell",
+            "qty": qty,
+            "price": px,
+            "quoted_price": raw_px,
+            "fee": fee,
+            "notional": round(qty * px, 2),
+            "realized_pnl": round((px - avg) * qty - fee, 4),
+            "stop_loss": stop,
+            "take_profit": tp,
+            "reason": trigger,
+            "trigger_level": float(stop if trigger == "stop_loss" else tp),
+            "entry_price": avg,
+            "bar_date": body.bar_date,
+            "ts": time.time(),
+            "venue": "paper",
+        }
+        if body.dry_run:
+            return {"symbol": body.symbol, "price": body.price, "exits": [fill], "dry_run": True, "position": pos}
 
-    state["cash"] = round(state["cash"] + qty * body.price, 4)
-    state["realized_pnl"] = round(float(state["realized_pnl"]) + fill["realized_pnl"], 4)
-    state["positions"].pop(body.symbol, None)
-    state["fills"].append(fill)
-    _save(state)
-    _record_trade(fill["realized_pnl"], count_trade=False)
+        state["cash"] = round(state["cash"] + qty * px - fee, 4)
+        state["realized_pnl"] = round(float(state["realized_pnl"]) + fill["realized_pnl"], 4)
+        state["positions"].pop(body.symbol, None)
+        state["fills"].append(fill)
+        _save(state)
+        _record_trade(fill["realized_pnl"], count_trade=False)
     return {"symbol": body.symbol, "price": body.price, "exits": [fill], "position": None}
 
 
-@app.post("/reset")
+@app.post("/reset", dependencies=[Depends(require_key)])
 def reset():
     # A paper reset must not erase today's realized loss from the daily limit.
-    old = _load()
-    carry = _daily(old, {})["realized_today"]
-    state = _empty_state()
-    if carry:
-        state["reset_carry"] = {"day": _today(), "realized": carry}
-    _save(state)
+    with _LOCK:
+        old = _load()
+        carry = _daily(old, {})["realized_today"]
+        state = _empty_state()
+        if carry:
+            state["reset_carry"] = {"day": _today(), "realized": carry}
+        _save(state)
     return {"status": "reset", "cash": state["cash"]}
 
 
-@app.post("/orders")
+@app.post("/orders", dependencies=[Depends(require_key)])
 def place_order(body: OrderRequest):
     if not body.risk_allowed:
         raise HTTPException(403, "risk_allowed=false — refuse order (paper)")
-
-    # Defense in depth: re-check kill switch at broker
-    try:
-        with httpx.Client(timeout=3.0) as client:
-            ks = client.get(f"{RISK_URL}/kill-switch").json()
-            if ks.get("killed"):
-                raise HTTPException(403, "kill_switch ON — broker refuse")
-    except httpx.HTTPError:
-        # Fail-closed if risk-guard unreachable
-        raise HTTPException(503, "risk-guard unreachable — fail-closed")
-
-    state = _load()
     side = body.side.lower()
     if side not in ("buy", "sell"):
         raise HTTPException(400, "side must be buy|sell")
 
-    notional = body.qty * body.price
-    realized = 0.0
-    positions = state.setdefault("positions", {})
+    with _LOCK:  # check and fill as one step: no double fill between them
+        state = _load()
+        positions = state.setdefault("positions", {})
+        marks = {body.symbol: body.price}
+        open_notional = sum(
+            float(p.get("qty", 0)) * float(p.get("avg_price", 0)) for p in positions.values()
+        )
+        daily = _daily(state, marks)
+        # Re-verify with the broker's own book. risk_allowed alone is not trusted.
+        risk = _risk_check(
+            {
+                "symbol": body.symbol,
+                "side": side,
+                "qty": body.qty,
+                "price": body.price,
+                "equity": _equity(state, marks),
+                "stop_loss": body.stop_loss,
+                "take_profit": body.take_profit,
+                "open_notional": open_notional,
+                "daily_pnl": daily["daily_pnl"],
+                "day_start_equity": daily["day_start_equity"],
+            }
+        )
+        if not risk.get("allowed"):
+            reason = risk.get("reason")
+            if reason == "kill_switch":
+                raise HTTPException(403, "kill_switch ON — broker refuse")
+            raise HTTPException(403, f"risk-guard denied at broker: {reason} {risk.get('detail') or ''}".strip())
 
-    if side == "buy":
-        if state["cash"] < notional:
-            raise HTTPException(400, "insufficient_cash")
-        state["cash"] = round(state["cash"] - notional, 4)
-        pos = positions.get(body.symbol, {"qty": 0.0, "avg_price": 0.0})
-        new_qty = float(pos["qty"]) + body.qty
-        if new_qty <= 0:
-            positions.pop(body.symbol, None)
-        else:
-            avg = (
-                (float(pos["qty"]) * float(pos["avg_price"]) + notional) / new_qty
-                if new_qty
-                else 0.0
-            )
+        px, fee = _costs(side, body.price, body.qty)
+        notional = body.qty * px
+        realized = 0.0
+        if side == "buy":
+            if state["cash"] < notional + fee:
+                raise HTTPException(400, "insufficient_cash")
+            state["cash"] = round(state["cash"] - notional - fee, 4)
+            pos = positions.get(body.symbol, {"qty": 0.0, "avg_price": 0.0})
+            new_qty = float(pos["qty"]) + body.qty
+            # Fee is folded into the cost basis, so realized P&L is after costs.
+            avg = (float(pos["qty"]) * float(pos["avg_price"]) + notional + fee) / new_qty
             new_pos: dict[str, Any] = {"qty": new_qty, "avg_price": round(avg, 6)}
             # Latest entry's protective levels apply to the whole position.
             sl = body.stop_loss if body.stop_loss is not None else pos.get("stop_loss")
@@ -303,40 +383,44 @@ def place_order(body: OrderRequest):
                 new_pos["stop_loss"] = sl
             if tp is not None:
                 new_pos["take_profit"] = tp
+            if body.bar_date:
+                new_pos["entry_bar"] = body.bar_date
             positions[body.symbol] = new_pos
-    else:
-        pos = positions.get(body.symbol)
-        if not pos or float(pos["qty"]) < body.qty - 1e-9:
-            raise HTTPException(400, "insufficient_position")
-        avg = float(pos["avg_price"])
-        realized = round((body.price - avg) * body.qty, 4)
-        state["cash"] = round(state["cash"] + notional, 4)
-        state["realized_pnl"] = round(float(state["realized_pnl"]) + realized, 4)
-        rem = float(pos["qty"]) - body.qty
-        if rem <= 1e-9:
-            positions.pop(body.symbol, None)
         else:
-            positions[body.symbol] = {**pos, "qty": rem, "avg_price": avg}
+            pos = positions.get(body.symbol)
+            if not pos or float(pos["qty"]) < body.qty - 1e-9:
+                raise HTTPException(400, "insufficient_position")
+            avg = float(pos["avg_price"])
+            realized = round((px - avg) * body.qty - fee, 4)
+            state["cash"] = round(state["cash"] + notional - fee, 4)
+            state["realized_pnl"] = round(float(state["realized_pnl"]) + realized, 4)
+            rem = float(pos["qty"]) - body.qty
+            if rem <= 1e-9:
+                positions.pop(body.symbol, None)
+            else:
+                positions[body.symbol] = {**pos, "qty": rem, "avg_price": avg}
 
-    fill = {
-        "fill_id": str(uuid.uuid4()),
-        "symbol": body.symbol,
-        "side": side,
-        "qty": body.qty,
-        "price": body.price,
-        "notional": round(notional, 2),
-        "realized_pnl": realized,
-        "stop_loss": body.stop_loss,
-        "take_profit": body.take_profit,
-        "reason": body.reason,
-        "ts": time.time(),
-        "venue": "paper",
-    }
-    state["fills"].append(fill)
-    _save(state)
-
-    # Inform risk-guard of trade count / pnl (best-effort)
-    _record_trade(realized, count_trade=True)
+        fill = {
+            "fill_id": str(uuid.uuid4()),
+            "symbol": body.symbol,
+            "side": side,
+            "qty": body.qty,
+            "price": px,
+            "quoted_price": body.price,
+            "fee": fee,
+            "notional": round(notional, 2),
+            "realized_pnl": realized,
+            "stop_loss": body.stop_loss,
+            "take_profit": body.take_profit,
+            "reason": body.reason,
+            "bar_date": body.bar_date,
+            "risk_recheck": risk.get("reason"),
+            "ts": time.time(),
+            "venue": "paper",
+        }
+        state["fills"].append(fill)
+        _save(state)
+        _record_trade(realized, count_trade=True)
 
     return {
         "status": "filled",

@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,12 +23,15 @@ LOG_PATH = VALIDATION_DIR / "run.log"
 PYTHON = os.getenv("SENTINEL_PYTHON", sys.executable)
 
 app = FastAPI(title="sentinel-dashboard-ui", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 _lock = threading.Lock()
 _job: dict = {"running": False, "exit_code": None, "error": None, "filename": None}
@@ -173,7 +176,7 @@ def validation_status():
         }
 
 
-@app.post("/api/validation/run")
+@app.post("/api/validation/run", dependencies=[Depends(require_key)])
 def validation_run(body: RunBody, request: Request):
     _local(request)
     bars = body.bars.upper()

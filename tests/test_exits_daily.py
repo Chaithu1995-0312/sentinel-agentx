@@ -27,6 +27,8 @@ def broker(tmp_path, monkeypatch):
     mod = _load("t_broker", "services/paper-broker/main.py")
     monkeypatch.setattr(mod, "STATE_PATH", tmp_path / "broker_state.json")
     monkeypatch.setattr(mod, "RISK_URL", DEAD_URL)
+    monkeypatch.setattr(mod, "FEE_BPS", 0.0)  # cost-free so P&L maths is exact
+    monkeypatch.setattr(mod, "SLIPPAGE_BPS", 0.0)
     return mod
 
 
@@ -102,7 +104,7 @@ def test_exit_runs_under_kill_switch_and_skips_trade_cap(broker, risk, tmp_path,
     monkeypatch.setattr(
         orch,
         "tool_evaluate_exits",
-        lambda client, s, p, d: bc.post("/evaluate-exits", json={"symbol": s, "price": p, "dry_run": d}).json(),
+        lambda client, s, p, d, bar=None: bc.post("/evaluate-exits", json={"symbol": s, "price": p, "dry_run": d}).json(),
     )
     bt = {
         "strategies": [{"name": "sma_crossover", "return": 0.1, "max_drawdown": 0.05, "trades": 2}],

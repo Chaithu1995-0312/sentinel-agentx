@@ -15,12 +15,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="sentinel-strategy-engine", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
 if str(BUILD_ROOT) not in sys.path:
@@ -40,6 +43,10 @@ FEE_BPS = float(os.getenv("FEE_BPS", "10"))
 SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))
 SWITCH_MARGIN = float(os.getenv("SWITCH_MARGIN", "0.02"))
 NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "14"))
+# Live pick ranks strategies on the trailing N bars only (no generator labels).
+LIVE_WINDOW_BARS = int(os.getenv("LIVE_WINDOW_BARS", "60"))
+STOP_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", "0.02"))
+MIN_RR = float(os.getenv("RISK_MIN_RR", "1.5"))
 # Worst headline at or below this vetoes a buy. One strong word (-2) / 2 = -1.0.
 NEWS_VETO_SCORE = -0.60
 NEWS_MILD_SCORE = -0.05
@@ -362,6 +369,90 @@ def _simulate(
         "equity": equity,
         "trade_dates": trade_dates,
         "trade_events": trade_events,
+    }
+
+
+def _simulate_strict(
+    bars: list[dict],
+    actions: list[str],
+    starting_cash: float,
+    cost_rate: float,
+    stop_pct: float,
+    tp_pct: float,
+) -> dict:
+    """Stricter check: a signal at bar i's close fills at bar i+1's open.
+
+    While long, each later bar is checked against the 2% stop and 3% take-profit
+    with its low/high (stop first if both are touched; a gap fills at the open),
+    the same rule as the live paper broker. A signal on the last bar cannot fill.
+    """
+    cash = float(starting_cash)
+    qty = 0.0
+    entry_px = 0.0
+    position = 0
+    fills = 0
+    stops = 0
+    tps = 0
+    pending: str | None = None
+    equity: list[float] = []
+    rate = max(0.0, float(cost_rate))
+    for i, bar in enumerate(bars):
+        o, h, lo, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
+        if pending == "buy" and position == 0:
+            fill_px = o * (1.0 + rate)
+            qty = cash / fill_px if fill_px else 0.0
+            cash, position, entry_px = 0.0, 1, o
+            fills += 1
+        elif pending == "sell" and position == 1:
+            cash, qty, position = qty * o * (1.0 - rate), 0.0, 0
+            fills += 1
+        pending = None
+        if position == 1:
+            stop = entry_px * (1.0 - stop_pct)
+            tp = entry_px * (1.0 + tp_pct)
+            exit_px = None
+            if lo <= stop:
+                exit_px, stops = (o if o <= stop else stop), stops + 1
+            elif h >= tp:
+                exit_px, tps = (o if o >= tp else tp), tps + 1
+            if exit_px is not None:
+                cash, qty, position = qty * exit_px * (1.0 - rate), 0.0, 0
+                fills += 1
+        act = actions[i]
+        if (act == "buy" and position == 0) or (act == "sell" and position == 1):
+            pending = act
+        equity.append(cash + qty * c)
+    final = equity[-1] if equity else starting_cash
+    return {
+        "return": (final / starting_cash) - 1.0 if starting_cash else 0.0,
+        "max_drawdown": _max_drawdown(equity),
+        "trades": fills,
+        "fills": fills,
+        "stop_exits": stops,
+        "take_profit_exits": tps,
+        "final_equity": final,
+        "equity": equity,
+    }
+
+
+def _trailing_report(net_sims: dict[str, dict], net_bh: dict, dates: list[str], window: int) -> dict:
+    """Rank strategies on the last `window` bars of the continuous backtest.
+
+    Uses only past bars up to the latest one, so it needs no regime labels.
+    """
+    window = max(5, min(int(window), len(dates) - 1))
+    start = dates[-window]
+    end = dates[-1]
+    rows = [_window_metrics(name, net_sims[name], dates, start, end) for name in STRATEGIES]
+    ranked = _rank(rows)
+    return {
+        "bars": window,
+        "start": start,
+        "end": end,
+        "label": f"Trailing {window} bars ending on the latest bar. Used for the live pick; no regime labels.",
+        "selected_strategy": _select_name(ranked),
+        "strategies": rows,
+        "buy_hold": _window_metrics("buy_and_hold", net_bh, dates, start, end),
     }
 
 
@@ -1004,7 +1095,15 @@ def backtest(body: BacktestRequest):
     regimes = _regime_reports(net_sims, gross_sims, bh_net, bh_gross, dates, meta)
     last_day = dates[-1]
     current = next((reg for reg in regimes if reg["start"] <= last_day <= reg["end"]), None)
-    regime_strategy = (current or {}).get("selected_strategy") or chosen
+    # Live pick: trailing window only. Mock regime labels are for the report, not decisions.
+    live_window = _trailing_report(net_sims, bh_net, dates, LIVE_WINDOW_BARS)
+    regime_strategy = live_window["selected_strategy"] or chosen
+    strict_rows = []
+    for name in STRATEGIES:
+        sim = _simulate_strict(bars, _actions(name, closes, body.fast, body.slow), body.starting_cash, rate, STOP_PCT, STOP_PCT * MIN_RR)
+        row = _pack(name, sim)
+        row.update({"stop_exits": sim["stop_exits"], "take_profit_exits": sim["take_profit_exits"]})
+        strict_rows.append(row)
     veto_reason = (example or {}).get("news_reason") or ""
     scored_news = []
     for item in news:
@@ -1073,7 +1172,13 @@ def backtest(body: BacktestRequest):
         "summary": summary,
         "mock_label": meta.get("label") or "",
         "current_regime": (current or {}).get("name"),
+        "regime_label_note": "Mock regime labels come from the data generator and are shown for reporting only; the live pick uses live_window.",
         "regime_strategy": regime_strategy,
+        "live_window": live_window,
+        "strict_check": {
+            "label": "Stricter fills: next-bar open, 2% stop and 3% take-profit on bar low/high, same costs. Not used for selection; shown so the pick can be compared under harsher rules. Mock data only.",
+            "strategies": _rank(strict_rows),
+        },
         "regimes": regimes,
         "news_decision_example": example,
         "news_boost_example": boost,
