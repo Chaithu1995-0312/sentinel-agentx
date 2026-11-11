@@ -385,6 +385,10 @@ def _journal_payload(
         if sig.get("news_reason"):
             body.setdefault("news_reason", sig.get("news_reason"))
         body.setdefault("signal_reason", sig.get("reason"))
+        # Present only when SENTINEL_LLM_NEWS is on: which scorer ran, model, temperature,
+        # news confidence, fallback reason. Journal-api stores `extra` in `structured`.
+        if sig.get("news_scorer") is not None:
+            body["extra"] = {**(body.get("extra") or {}), "news_scorer": sig["news_scorer"]}
     return body
 
 

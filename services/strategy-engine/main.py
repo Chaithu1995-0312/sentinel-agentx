@@ -1,4 +1,4 @@
-"""strategy-engine — SMA, RSI mean-reversion, Bollinger breakout, lexicon news."""
+"""strategy-engine — SMA, RSI mean-reversion, Bollinger breakout, lexicon news (optional Grok scorer)."""
 from __future__ import annotations
 
 import csv
@@ -29,6 +29,7 @@ BUILD_ROOT = Path(__file__).resolve().parents[2]
 if str(BUILD_ROOT) not in sys.path:
     sys.path.insert(0, str(BUILD_ROOT))
 from shared.selection import apply_hysteresis  # noqa: E402
+from shared import llm_news  # noqa: E402
 MARKET_URL = os.getenv("MARKET_INGEST_URL", "http://127.0.0.1:8001")
 FAST = int(os.getenv("SMA_FAST", "5"))
 SLOW = int(os.getenv("SMA_SLOW", "15"))
@@ -571,6 +572,48 @@ def _news_window(items: list[dict], as_of: str) -> list[dict]:
     return kept
 
 
+def _news_rules(action: str, confidence: float, score: float) -> tuple[str, float, float, str]:
+    """Veto / sizing / confidence rules. Shared by the word-list and LLM scorers."""
+    conf = float(confidence)
+    size = 1.0
+    note: str | None = None
+    if action == "buy" and score <= NEWS_VETO_SCORE:
+        action = "hold"
+        conf = round(conf * 0.6, 3)
+        size = 0.0
+        note = "Strongly negative news vetoed the buy (score at or below -0.60)."
+    elif action == "buy" and score <= NEWS_MILD_SCORE:
+        conf = round(conf * 0.6, 3)
+        size = 0.5
+        note = "Negative news lowered confidence to 60% and cut size in half."
+    elif action == "buy" and score >= NEWS_POSITIVE_SCORE:
+        conf = round(min(1.0, conf + 0.10), 3)
+        note = "Positive news raised confidence by 0.10."
+    elif action == "sell" and score <= NEWS_VETO_SCORE:
+        conf = round(min(1.0, conf + 0.10), 3)
+        note = "Strongly negative news raised sell confidence by 0.10."
+    elif action == "sell" and score >= NEWS_POSITIVE_SCORE:
+        conf = round(max(0.0, conf * 0.85), 3)
+        note = "Positive news lowered sell confidence slightly (multiplied by 0.85)."
+    elif action == "hold" and score <= NEWS_VETO_SCORE:
+        conf = round(conf * 0.6, 3)
+        note = "Strongly negative news would veto a buy. Confidence was reduced."
+    elif action == "hold" and score <= NEWS_MILD_SCORE:
+        conf = round(conf * 0.6, 3)
+        note = "Negative news lowered confidence. It does not create a trade by itself."
+    elif action == "hold" and score >= NEWS_POSITIVE_SCORE:
+        conf = round(min(1.0, conf + 0.10), 3)
+        note = "Positive news raised confidence by 0.10. It does not create a buy by itself."
+    if note is None:
+        if score <= NEWS_MILD_SCORE:
+            note = "News is negative but not strong enough to change this signal."
+        elif score >= NEWS_POSITIVE_SCORE:
+            note = "News is positive but does not change this signal."
+        else:
+            note = "News is neutral, so the technical signal stands."
+    return action, conf, size, note
+
+
 def _apply_news(tech: dict, items: list[dict], as_of: str) -> dict:
     window = _news_window(items, as_of)
     scored: list[dict] = []
@@ -616,44 +659,7 @@ def _apply_news(tech: dict, items: list[dict], as_of: str) -> dict:
         f"Lexicon hits: {hits}. "
         "Score is the weight sum divided by 2 and clamped to [-1, 1]."
     )
-    action = tech["action"]
-    conf = float(tech["confidence"])
-    size = 1.0
-    note: str | None = None
-    if action == "buy" and score <= NEWS_VETO_SCORE:
-        action = "hold"
-        conf = round(conf * 0.6, 3)
-        size = 0.0
-        note = "Strongly negative news vetoed the buy (score at or below -0.60)."
-    elif action == "buy" and score <= NEWS_MILD_SCORE:
-        conf = round(conf * 0.6, 3)
-        size = 0.5
-        note = "Negative news lowered confidence to 60% and cut size in half."
-    elif action == "buy" and score >= NEWS_POSITIVE_SCORE:
-        conf = round(min(1.0, conf + 0.10), 3)
-        note = "Positive news raised confidence by 0.10."
-    elif action == "sell" and score <= NEWS_VETO_SCORE:
-        conf = round(min(1.0, conf + 0.10), 3)
-        note = "Strongly negative news raised sell confidence by 0.10."
-    elif action == "sell" and score >= NEWS_POSITIVE_SCORE:
-        conf = round(max(0.0, conf * 0.85), 3)
-        note = "Positive news lowered sell confidence slightly (multiplied by 0.85)."
-    elif action == "hold" and score <= NEWS_VETO_SCORE:
-        conf = round(conf * 0.6, 3)
-        note = "Strongly negative news would veto a buy. Confidence was reduced."
-    elif action == "hold" and score <= NEWS_MILD_SCORE:
-        conf = round(conf * 0.6, 3)
-        note = "Negative news lowered confidence. It does not create a trade by itself."
-    elif action == "hold" and score >= NEWS_POSITIVE_SCORE:
-        conf = round(min(1.0, conf + 0.10), 3)
-        note = "Positive news raised confidence by 0.10. It does not create a buy by itself."
-    if note is None:
-        if score <= NEWS_MILD_SCORE:
-            note = "News is negative but not strong enough to change this signal."
-        elif score >= NEWS_POSITIVE_SCORE:
-            note = "News is positive but does not change this signal."
-        else:
-            note = "News is neutral, so the technical signal stands."
+    action, conf, size, note = _news_rules(tech["action"], float(tech["confidence"]), score)
     out["action"] = action
     out["confidence"] = round(conf, 3)
     out["size_multiplier"] = size
@@ -664,6 +670,77 @@ def _apply_news(tech: dict, items: list[dict], as_of: str) -> dict:
         out["reason"] = f"{tech['reason']}. {note}"
     else:
         out["reason"] = tech["reason"]
+    return out
+
+
+def _apply_news_llm(tech: dict, items: list[dict], as_of: str, *, transport=None) -> dict:
+    """SENTINEL_LLM_NEWS=true path. Grok scores the window; the same rules apply.
+
+    Any failure falls back to the word-list result and records why.
+    """
+    meta: dict = {"scorer": "wordlist", "fallback_reason": None, "model": None,
+                  "temperature": None, "llm_confidence": None, "reason": None, "headline_ids": []}
+    try:
+        cfg = llm_news.config()
+        meta["model"] = cfg["model"]
+        meta["temperature"] = cfg["temperature"]
+    except ValueError:
+        cfg = None
+    window = _news_window(items, as_of)
+    fallback = None
+    result = None
+    headlines = [
+        {"id": f"h{i + 1}", "date": it.get("date"), "source": it.get("source"), "headline": it.get("headline") or ""}
+        for i, it in enumerate(window)
+    ]
+    if cfg is None:
+        fallback = "invalid_config"
+    elif not window:
+        fallback = "no_headlines_in_window"
+    else:
+        try:
+            result = llm_news.score(str(tech.get("symbol") or ""), as_of, headlines, transport=transport)
+        except llm_news.LLMNewsError as e:
+            fallback = e.reason
+    if result is None:
+        out = _apply_news(tech, items, as_of)
+        meta["fallback_reason"] = fallback
+        out["news_scorer"] = meta
+        if fallback != "no_headlines_in_window":
+            out["news_reason"] = f"{out['news_reason']} (LLM scorer not used: {fallback}; word list applied.)"
+        return out
+
+    out = _apply_news(tech, items, as_of)  # technical_* fields and word-list per-item scores for comparison
+    by_id = {h["id"]: h for h in headlines}
+    for h, row in zip(headlines, out["news_items"]):
+        row["id"] = h["id"]
+    score = float(result["sentiment_score"])
+    action, conf, size, note = _news_rules(tech["action"], float(tech["confidence"]), score)
+    cited = "; ".join(f"\"{by_id[i]['headline']}\" ({by_id[i]['date']})" for i in result["headline_ids"])
+    noun = "headline" if len(headlines) == 1 else "headlines"
+    base = (
+        f"Grok ({result['model']}, temperature {result['temperature']:g}) read {len(headlines)} {noun} "
+        f"in the last {NEWS_LOOKBACK_DAYS} days and scored them {score:+.2f} "
+        f"(news confidence {result['confidence']:.2f}, separate from the technical confidence). "
+        f"Cited: {cited}. Model reason: {result['reason']}"
+    )
+    out["action"] = action
+    out["confidence"] = round(conf, 3)
+    out["size_multiplier"] = size
+    out["news_score"] = round(score, 4)
+    out["news_reason"] = f"{base} {note}"
+    out["news_changed_decision"] = action != tech["action"]
+    out["reason"] = f"{tech['reason']}. {note}" if action != tech["action"] else tech["reason"]
+    meta.update(
+        {
+            "scorer": "llm",
+            "llm_confidence": round(float(result["confidence"]), 4),
+            "reason": result["reason"],
+            "headline_ids": result["headline_ids"],
+            "tokens": result["tokens"],
+        }
+    )
+    out["news_scorer"] = meta
     return out
 
 
@@ -1038,7 +1115,10 @@ def signal(body: SignalRequest):
     _check_strategy(body.strategy, body.fast, body.slow)
     bars = _bars_as_of(body.as_of_date)
     tech = _technical(body.strategy, bars, body.fast, body.slow, body.symbol)
-    out = _apply_news(tech, _fetch_news(), tech.get("date") or "")
+    if llm_news.enabled():
+        out = _apply_news_llm(tech, _fetch_news(), tech.get("date") or "")
+    else:
+        out = _apply_news(tech, _fetch_news(), tech.get("date") or "")
     out.update(_stop_defaults())
     return out
 

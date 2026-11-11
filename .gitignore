@@ -18,3 +18,4 @@ data/*.jsonl
 !data/.gitkeep
 data/validation/
 data/realdata/
+data/*.tmp
