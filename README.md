@@ -64,6 +64,10 @@ Paper trading and mock data only. Services bind to 127.0.0.1.
 
 Tests: `python -m pytest -q tests` (pytest is in `requirements.txt`; CI workflow in `.github/workflows/tests.yml`).
 
+## Pre-work and build window
+
+To be upfront: the design, the mock-data scaffolding and earlier iterations of these services were prepared before the AgentX build window opened (11 Nov 2026, 10:00 AM IST). The first stop-loss and daily-limit change (`46f62fc`, 11 Nov 00:34 IST) was also made before the window. The hardening fixes listed under "Security & design choices" (broker risk re-check, file locking and atomic writes, serialized `/run`, CORS allow-list, optional API key, trailing 60-bar live pick, intraday stop/take-profit triggers, and 32 new tests) were committed inside the window in `13b4ee6`. The commit history shows the dates.
+
 ## Docs
 
 - [PREBUILD_RUNBOOK.md](./PREBUILD_RUNBOOK.md)
