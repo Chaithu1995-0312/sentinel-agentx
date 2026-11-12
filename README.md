@@ -2,6 +2,20 @@
 
 Paper-trading agentic assistant for team **Chaithu1705**. **No live money.**
 
+## How the agent works
+
+The **agent-orchestrator** is the agent. The other six services are its tools. One `POST /run` cycle:
+
+1. Read the kill switch. Close any position whose stop or take-profit was hit (exits still run when the switch is ON, because they only reduce risk).
+2. If the kill switch is ON, journal the block and stop — no new entry.
+3. Fetch mock prices and headlines from market-ingest.
+4. Backtest the three strategies, pick the live one on the last 60 bars, and get a signal from strategy-engine.
+5. News can veto or resize a buy. The default scorer is a word list. If `SENTINEL_LLM_NEWS=true` and `GROK_API_KEY` are set, Grok scores the in-window headlines; the same veto / half-size / +0.10 rules then apply. Any failure falls back to the word list. Backtests never use news.
+6. Size the order, pass it through risk-guard, and fill it in paper-broker (the broker re-checks risk itself).
+7. Write a plain-language journal entry. When the optional Grok path ran, the entry's `structured.news_scorer` records `scorer` (`llm` or `wordlist`), `fallback_reason`, model, temperature, and `llm_confidence`. The dashboard News panel and journal chips show these fields when present.
+
+The agent cannot bypass the risk guard or the human kill switch. A missing or corrupt kill-switch file counts as ON.
+
 ## Quick start (Python only — no Docker)
 
 ```bash
@@ -36,10 +50,37 @@ python scripts/demo_run.py
 
 - **Paper trading only** — simulated fills in `paper-broker`
 - **Hard risk** — position %, stop-loss %, daily loss, max trades/day, min RR (`risk-guard`)
+- **Stop-loss / take-profit exits** — every buy stores its stop (entry −2%) and take-profit (entry +3%) on the paper position. At the start of each `/run` cycle, before any new signal, the orchestrator sends the latest mock close to `paper-broker` `POST /evaluate-exits`. Price at or below the stop closes the whole position (reason `stop_loss`); at or above the take-profit closes it (reason `take_profit`). On later bars the bar low/high is used and a gap fills at the open (see Security & design choices). Exits only reduce risk, so they run even with the kill switch ON and do not use the 10-trades-a-day cap (risk-guard counts them as `exits_today`). Each exit gets a plain-English journal entry. `dry_run` reports the exit without closing.
+- **True daily loss limit** — `paper-broker` `GET /daily-pnl` returns today's realized P&L (fills on this machine's local date) plus current unrealized P&L on open positions at the latest close. Risk-guard refuses new orders when that is at or below −3% of start-of-day equity (cash + open positions at cost, snapshotted on the first broker call of each local date). The window resets by date; a paper `/reset` keeps today's realized loss.
 - **Human kill switch** — persisted under `data/kill_switch.json`; agent cannot bypass; fail-closed
-- **Backtest vs buy-and-hold** — SMA crossover in `strategy-engine`
+- **Mock year of prices** — `python scripts/gen_mock_ohlcv.py` (fixed seed) writes about 12 months of weekday bars with a rally, a sharp crash, chop, and a recovery. It is labeled mock data. The old 80-day uptrend is `seeds/ohlcv_short_sample.csv`.
+- **Backtest vs buy-and-hold** — SMA crossover, RSI(2) mean reversion, and Bollinger breakout, overall and inside each regime. Fills pay 10 bps fee plus 5 bps slippage per side. The orchestrator ranks by net score, `net return - 0.5 * net max drawdown`, and will not hold a strategy with a negative net score (it stays in cash). The live pick re-ranks on the trailing 60 bars and switches only with a 2 percentage point lead. Buy-and-hold is the benchmark only.
+- **News-aware signals** — default scorer is a word list in `strategy-engine`. Strongly negative crash headlines veto a buy; positive headlines raise confidence by 0.10. The signal carries `news_score` and `news_reason`, and the journal says them in plain English.
+- **Optional Grok news scorer (off by default).** Set `SENTINEL_LLM_NEWS=true` and `GROK_API_KEY` in your local `.env` to have `strategy-engine` send the symbol, bar date and in-window headlines (with ids) to xAI chat completions in one call. The model must return JSON only: `sentiment_score` (-1..1), `confidence` (0..1, the model's news confidence, kept separate from the technical confidence), `headline_ids` (subset of the ids sent) and a short `reason`. Responses are validated strictly, nothing is clamped; the score then goes through the same veto / half-size / +0.10 rules. Missing key, timeout, HTTP error, invalid JSON or the daily token cap all fall back to the word list. The signal and journal record `news_scorer` (`scorer` is `llm` or `wordlist`, plus `fallback_reason`, `model`, `temperature`, `llm_confidence`, `reason`). The dashboard News panel and journal chips show that metadata when present. Settings: `SENTINEL_LLM_MODEL` (default `grok-4.20-0309-non-reasoning`), `SENTINEL_LLM_TEMPERATURE` (default 0, sent in the request), `SENTINEL_LLM_TIMEOUT_S` (default 8), `SENTINEL_LLM_DAILY_TOKEN_CAP` (default 50000, tracked in gitignored `data/llm_news_usage.json`). With the flag off, behaviour is unchanged. Backtests never use news.
 - **Plain-language journal** — template text per trade (`journal-api`)
-- **Agent = tool loop** — orchestrator calls APIs (not a chatbot)
+
+## Security & design choices
+
+Paper trading and mock data only. Services bind to 127.0.0.1.
+
+- **Broker re-verifies every order.** `paper-broker /orders` calls risk-guard `/check-order` itself, using its own book (equity marked at the order price, open exposure, today's P&L, start-of-day equity). A caller's `risk_allowed=true` is required but never enough. If risk-guard is unreachable, the broker refuses (fail-closed).
+- **No double fills.** State files are written atomically (temp file + `os.replace`) under a per-process lock (`shared/state_io.py`); the broker checks risk and fills inside one lock; the orchestrator serialises `/run` (a second concurrent call waits, then gets 409). Each state file is owned by one service process (single uvicorn worker).
+- **CORS allow-list, not `*`.** Default: `http://127.0.0.1:8010`, `http://localhost:8010` and `null` (the Origin browsers send for the offline `file://` demo hub). Override with `SENTINEL_CORS_ORIGINS`; drop `null` if you don't use the offline hub.
+- **Optional API key.** Set `SENTINEL_API_KEY` and every mutating route (`/run`, `/orders`, `/reset`, `/evaluate-exits`, `/kill-switch` POST, `/record-trade`, journal writes and clear) requires header `X-Sentinel-Key`. Services forward it to each other. The dashboard and judge view send it when opened once with `?key=...` (stored in the browser). **Unset (default) = local demo mode, routes are open on localhost.**
+- **Live strategy pick uses a trailing window.** The live pick ranks strategies on the last `LIVE_WINDOW_BARS` (default 60) bars of the continuous backtest, then applies the 0.02 switch margin. The mock regime labels from the data generator are shown for reporting only and never drive decisions.
+- **Paper fills pay costs.** Same model as the backtest: 5 bps slippage against us plus 10 bps fee (`PAPER_SLIPPAGE_BPS`, `PAPER_FEE_BPS`). Fees are in the cost basis, so realized P&L is after costs.
+- **Exits use the bar's range.** On a bar after entry, the stop triggers on the bar low and the take-profit on the high; a gap through the level fills at the open; if both are touched, the stop is assumed first. On the entry bar only the close is used.
+- **Strict backtest check.** `/backtest` also reports `strict_check`: next-bar-open fills plus the 2% stop / 3% take-profit on bar low/high. It is shown for comparison, not used for selection. The backtest still ignores news.
+- **Sizing rounds down** to 4 decimals so a full-size order never lands a hair over the 5% cap.
+- **Optional autopilot.** `SENTINEL_AUTORUN_SECONDS=N` makes the orchestrator call its own cycle every N seconds (default 0 = off; status at `GET :8005/autopilot`).
+- **Decisions stay deterministic.** Sizing, risk checks, fills, and the journal are Python rules and templates. An optional Grok scorer can classify headlines when `SENTINEL_LLM_NEWS=true`; it does not pick the strategy, size the order, or override risk limits, and the flag is off by default. Backtests never use news.
+- Not production-ready: no database, single symbol (`SYNTH`; other symbols get 404), no real broker adapter. `docker-compose.yml` is kept for optional use and is not tested with this build.
+
+Tests: `python -m pytest -q tests` (pytest is in `requirements.txt`; CI workflow in `.github/workflows/tests.yml`).
+
+## Pre-work and build window
+
+To be upfront: the design, the mock-data scaffolding and earlier iterations of these services were prepared before the AgentX build window opened (11 Nov 2026, 10:00 AM IST). The first stop-loss and daily-limit change (`46f62fc`, 11 Nov 00:34 IST) was also made before the window. The hardening fixes listed under "Security & design choices" (broker risk re-check, file locking and atomic writes, serialized `/run`, CORS allow-list, optional API key, trailing 60-bar live pick, intraday stop/take-profit triggers, and 32 new tests) were committed inside the window in `13b4ee6`. The commit history shows the dates.
 
 ## Docs
 
@@ -48,3 +89,13 @@ python scripts/demo_run.py
 - [GITHUB_SETUP.md](./GITHUB_SETUP.md)
 
 Docker compose files may still exist for optional use; **primary path is uvicorn via `scripts/run_all.py`.**
+
+## Private validation (not demo data)
+
+The Validation page at http://127.0.0.1:8010/validation reads `data/validation/validation_results.json` on this machine. Real CSVs stay in `data/realdata/`. Both folders are gitignored.
+
+```bash
+python scripts/validate_real.py --csv data/realdata/YOUR.csv --symbol XAUUSD --bars H1
+```
+
+The script resamples local bars, backtests the three strategies against buy-and-hold, checks the result with pandas, and runs paper risk tests against the local services. It does not contact a broker or MT5. The page can re-run any CSV already in `data/realdata/`.

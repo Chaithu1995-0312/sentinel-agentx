@@ -1,0 +1,35 @@
+{
+  "label": "MOCK DATA. Synthetic weekday prices and headlines for paper trading only. Not a real market and not a forecast.",
+  "seed": 20251107,
+  "symbol": "SYNTH",
+  "bars": 252,
+  "start": "2024-11-18",
+  "end": "2025-11-04",
+  "crash_close_to_close": -0.25,
+  "regimes": [
+    {
+      "name": "rally",
+      "start": "2024-11-18",
+      "end": "2025-03-07",
+      "bars": 80
+    },
+    {
+      "name": "crash",
+      "start": "2025-03-10",
+      "end": "2025-04-10",
+      "bars": 24
+    },
+    {
+      "name": "chop",
+      "start": "2025-04-11",
+      "end": "2025-07-23",
+      "bars": 74
+    },
+    {
+      "name": "recovery",
+      "start": "2025-07-24",
+      "end": "2025-11-04",
+      "bars": 74
+    }
+  ]
+}

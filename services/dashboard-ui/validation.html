@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sentinel — validation</title>
+  <script src="/static/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #070b14; --card: #121a2b; --line: #26344c; --text: #e7eef9; --muted: #93a0b8;
+      --red: #ff3b30; --green: #3dd68c; --amber: #f5b942; --blue: #7eb0ff;
+      --shadow: 0 10px 30px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(1200px 500px at 10% -10%, #152038 0%, var(--bg) 55%);
+      color: var(--text); line-height: 1.45;
+    }
+    button, select { font: inherit; cursor: pointer; }
+    .page { max-width: 1560px; margin: 0 auto; padding: 16px 20px 48px; }
+    .top {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+      padding: 14px 16px; background: rgba(18, 26, 43, .92); border: 1px solid var(--line);
+      border-radius: 16px; box-shadow: var(--shadow); position: sticky; top: 8px; z-index: 5;
+    }
+    h1 { font-size: 1.25rem; margin: 0; letter-spacing: -.02em; }
+    .brand-row, .nav, .runbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .nav a { color: var(--muted); text-decoration: none; font-size: .8rem; font-weight: 750; padding: 4px 8px; border-radius: 8px; }
+    .nav a[aria-current="page"], .nav a:hover { color: var(--text); background: #0c1322; }
+    .paper, .private {
+      display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 999px;
+      font-size: .78rem; font-weight: 800; letter-spacing: .04em;
+    }
+    .paper { background: var(--amber); color: #1d1402; letter-spacing: .08em; }
+    .private { background: #3a2a12; color: var(--amber); border: 1px solid #6a5320; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: var(--shadow); margin-top: 12px; }
+    h2 { margin: 0 0 8px; font-size: .95rem; }
+    h3 { margin: 16px 0 8px; font-size: .82rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .note, .empty { color: var(--muted); font-size: .86rem; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; color: #d5e2f7; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.selected td { background: #173156; }
+    tr.benchmark td { color: var(--muted); }
+    .pill { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: #1c3f73; color: #d6e6ff; font-size: .68rem; letter-spacing: .04em; }
+    .badge { display: inline-block; min-width: 52px; text-align: center; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 800; letter-spacing: .05em; }
+    .badge.pass { background: rgba(61, 214, 140, .16); color: var(--green); }
+    .badge.fail { background: rgba(255, 59, 48, .16); color: #ff8d87; }
+    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 12px; }
+    .chart-wrap { position: relative; height: 280px; }
+    .chart-wrap canvas, .chart-wrap img { width: 100%; height: 100%; object-fit: contain; }
+    .checks { display: flex; flex-direction: column; gap: 8px; }
+    .check { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; background: #0c1322; border: 1px solid var(--line); border-radius: 10px; }
+    .ghost, .primary { border-radius: 10px; padding: 8px 12px; font-weight: 700; border: 1px solid var(--line); }
+    .ghost { background: #0c1322; color: var(--text); }
+    .primary { background: #1c3f73; color: white; border-color: #3d6cb5; }
+    select { background: #0c1322; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+    pre { white-space: pre-wrap; background: #0c1322; border-radius: 10px; padding: 10px; color: var(--muted); font-size: .75rem; max-height: 180px; overflow: auto; }
+    ul { margin: 8px 0 0; padding-left: 1.1rem; }
+    li { margin: 4px 0; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div>
+        <div class="brand-row">
+          <h1>Sentinel — paper-trading agent</h1>
+          <span class="paper">PAPER ONLY</span>
+          <nav class="nav" aria-label="Pages">
+            <a href="/">Paper</a>
+            <a href="/validation" aria-current="page">Validation</a>
+          </nav>
+        </div>
+      </div>
+      <span class="private">Private validation on real historical data - not part of hackathon demo data</span>
+    </header>
+
+    <section class="card">
+      <h2>Re-run validation</h2>
+      <p class="note">Local CSVs in <code>data/realdata/</code> only. The button calls this machine on 127.0.0.1. It does not contact a broker or MT5.</p>
+      <div class="runbar">
+        <select id="csvPick" aria-label="CSV in data/realdata"></select>
+        <select id="barsPick" aria-label="Bar size">
+          <option>H1</option>
+          <option>M15</option>
+          <option>H4</option>
+        </select>
+        <button class="primary" id="runBtn" type="button">Re-run validation</button>
+      </div>
+      <p class="note" id="runState">Idle.</p>
+      <pre id="runLog" hidden></pre>
+    </section>
+
+    <div id="body"><p class="empty">Loading validation results...</p></div>
+  </div>
+  <script>
+    const DEFAULT_CAVEATS = [
+      'The windows are short: about one month of gold and the last 30 days of bitcoin. A strategy that wins here is not a claim about any other period.',
+      'No real news was available. Both runs used an empty news list, so every news score is 0 and news cannot veto or boost a signal. Price backtests ignore news anyway.',
+      'Fees and slippage are zero. The simulator buys and sells the full book at the bar close. There is no spread, commission, or funding.',
+      'Bars are resampled to H1. Partial hours stay in the sample. An H1 signal uses that hour close and no later hour.',
+      'Fixed mock regimes (rally, crash, chop, recovery) do not overlap these bars. They were not applied. Early, mid, and late slices are equal parts of this sample.',
+      'The paper fill can be forced so a last bar that is not a buy still passes through risk-guard. That fill is not a claim that the strategy wanted to trade. The daily-loss case uses a simulated lower sell price, not a market print.',
+      'Kill switch, position cap, and daily loss limit are the service checks. This run did not place an order on any live venue.'
+    ];
+    let charts = [];
+    let poll = null;
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function pct(x) {
+      const n = Number(x);
+      return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : 'n/a';
+    }
+    function badge(ok) {
+      return `<span class="badge ${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</span>`;
+    }
+    async function getJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(r.status + ' ' + url);
+      return r.json();
+    }
+    async function postJson(url, body) {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      return data;
+    }
+
+    function periodText(inst) {
+      const health = inst.market_health || {};
+      const cov = inst.coverage || {};
+      const tf = health.timeframe || 'H1';
+      const bars = health.bars || (inst.backtest && inst.backtest.bars) || 'n/a';
+      const first = health.first || cov.m15_first || '';
+      const last = health.last || cov.m15_last || '';
+      const extra = cov.h1_bars ? ` Source rows ${cov.m15_bars || health.source_rows || 'n/a'}, H1 bars ${cov.h1_bars}.` : '';
+      return `${esc(tf)} · ${esc(bars)} bars · ${esc(first)} to ${esc(last)}.${esc(extra)}`;
+    }
+    function table(bt) {
+      const rows = (bt.strategies || []).concat(bt.buy_hold ? [bt.buy_hold] : []);
+      const pick = bt.selected_strategy;
+      const body = rows.map(row => {
+        const role = row.name === 'buy_and_hold' ? 'benchmark' : (row.name === pick ? 'selected' : '');
+        const label = role === 'selected' ? ' <span class="pill">selected</span>' : (role === 'benchmark' ? ' <span class="pill">benchmark</span>' : '');
+        const gross = pct(row.gross_return == null ? row.return : row.gross_return);
+        const fills = row.fills == null ? row.trades : row.fills;
+        return `<tr class="${role}"><td>${esc(row.name)}${label}</td><td class="num">${gross}</td><td class="num">${pct(row.return)}</td><td class="num">${pct(row.max_drawdown)}</td><td class="num">${esc(fills)}</td><td class="num">${row.score == null ? 'n/a' : Number(row.score).toFixed(4)}</td></tr>`;
+      }).join('');
+      return `<table><thead><tr><th>Strategy</th><th class="num">Gross</th><th class="num">Net</th><th class="num">Net max DD</th><th class="num">Fills</th><th class="num">Net score</th></tr></thead><tbody>${body}</tbody></table>` +
+        `<p class="note">${esc(bt.selection_reason || '')}</p>`;
+    }
+    function checkDetail(name, item) {
+      if (!item) return '';
+      if (name === 'buy_and_hold') return `pandas return ${item.pandas_return_rounded} vs engine ${item.engine_return}; pandas max DD ${item.pandas_max_drawdown_rounded} vs engine ${item.engine_max_drawdown}`;
+      if (name === 'sma_trade_dates') return `pandas ${item.pandas_trades} trades, engine ${item.engine_trades}, mismatches ${item.mismatch_count}`;
+      if (name === 'bar_construction') return `api ${item.api_bars} vs pandas ${item.pandas_bars}`;
+      if (name === 'no_lookahead') return item.definition || 'prefix and last-bar shock';
+      if (name === 'score_selection') return `ranked ${item.ranked_first}, engine ${item.engine_selected}`;
+      if (name === 'regimes_not_fixed_mock') return `regime_source=${item.regime_source || 'n/a'}`;
+      return '';
+    }
+    function checksHtml(checks) {
+      const entries = Object.entries(checks || {});
+      if (!entries.length) return '<p class="empty">No correctness checks in this file.</p>';
+      return `<div class="checks">${entries.map(([name, item]) => {
+        const ok = !!(item && item.pass);
+        return `<div class="check"><div><strong>${esc(name.replaceAll('_', ' '))}</strong><div class="note">${esc(checkDetail(name, item))}</div></div>${badge(ok)}</div>`;
+      }).join('')}</div>`;
+    }
+    function riskOk(block, kind) {
+      if (!block) return false;
+      if (block.pass === true || block.pass === false) return block.pass;
+      if (kind === 'kill') return block.status === 'blocked_kill_switch';
+      if (kind === 'fill') return block.status === 'filled' && (block.stop_math ? block.stop_math.matches_engine_rounding !== false : true);
+      if (kind === 'over') return block.status === 'risk_denied' && (block.risk || {}).reason === 'max_position_pct';
+      if (kind === 'loss') return block.status === 'risk_denied' && (block.risk || {}).reason === 'daily_loss_limit';
+      return false;
+    }
+    function riskHtml(agent) {
+      agent = agent || {};
+      const rows = [
+        ['Kill switch blocked', riskOk(agent.kill_switch, 'kill'), agent.kill_switch && agent.kill_switch.status],
+        ['Forced fill with stop and take profit', riskOk(agent.force_fill, 'fill'), fillText(agent.force_fill)],
+        ['Oversized order denied', riskOk(agent.oversized, 'over'), (agent.oversized && agent.oversized.risk && agent.oversized.risk.detail) || (agent.oversized && agent.oversized.status)],
+        ['Daily loss limit', riskOk(agent.daily_loss, 'loss'), (agent.daily_loss && agent.daily_loss.risk && agent.daily_loss.risk.detail) || (agent.daily_loss && agent.daily_loss.status)]
+      ];
+      return `<div class="checks">${rows.map(([label, ok, detail]) =>
+        `<div class="check"><div><strong>${esc(label)}</strong><div class="note">${esc(detail || '')}</div></div>${badge(ok)}</div>`
+      ).join('')}</div>`;
+    }
+    function fillText(block) {
+      if (!block) return '';
+      const math = block.stop_math || {};
+      const fill = (block.order && block.order.fill) || {};
+      const stop = math.actual_stop || fill.stop_loss;
+      const tp = math.actual_take_profit || fill.take_profit;
+      if (stop == null) return block.status || '';
+      return `stop ${stop}, take profit ${tp}`;
+    }
+    function chartMount(inst, id) {
+      const curve = inst.equity_curve || (inst.backtest && inst.backtest.equity_curve);
+      const bh = inst.buy_hold_curve || (inst.backtest && inst.backtest.buy_hold_curve);
+      if (curve && curve.length && bh && bh.length && typeof Chart !== 'undefined') {
+        return `<div class="chart-wrap"><canvas id="${id}"></canvas></div>`;
+      }
+      if (inst.chart_url) return `<div class="chart-wrap"><img alt="Equity curve for ${esc(inst.symbol)}" src="${esc(inst.chart_url)}" /></div>`;
+      return '<p class="empty">No equity series or local PNG for this instrument.</p>';
+    }
+    function drawCharts(instruments) {
+      charts.forEach(c => c.destroy());
+      charts = [];
+      instruments.forEach((inst, i) => {
+        const canvas = document.getElementById('chart-' + i);
+        const curve = inst.equity_curve || (inst.backtest && inst.backtest.equity_curve);
+        const bh = inst.buy_hold_curve || (inst.backtest && inst.backtest.buy_hold_curve);
+        if (!canvas || !curve || !bh || typeof Chart === 'undefined') return;
+        const labels = curve.map(p => p.date);
+        const bhMap = {};
+        bh.forEach(p => { bhMap[p.date] = p.equity; });
+        charts.push(new Chart(canvas, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { label: 'Paper agent', data: curve.map(p => p.equity), borderColor: '#7eb0ff', pointRadius: 0, borderWidth: 2, tension: 0.15 },
+              { label: 'Buy and hold', data: labels.map(d => bhMap[d] ?? null), borderColor: '#f5b942', borderDash: [5, 4], pointRadius: 0, borderWidth: 2, tension: 0.15 }
+            ]
+          },
+          options: {
+            animation: false, responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#c5d0e2', boxWidth: 12 } } },
+            scales: {
+              x: { ticks: { color: '#93a0b8', maxTicksLimit: 6 }, grid: { color: 'rgba(38,52,76,.5)' } },
+              y: { ticks: { color: '#93a0b8' }, grid: { color: 'rgba(38,52,76,.5)' } }
+            }
+          }
+        }));
+      });
+    }
+    function render(data) {
+      const host = document.getElementById('body');
+      if (!data.present) {
+        host.innerHTML = `<section class="card"><h2>No validation file yet</h2><p class="empty">${esc(data.how_to || 'Add data/validation/validation_results.json on this machine.')}</p><p class="note">Real market files stay in <code>data/realdata/</code> and <code>data/validation/</code>. Both folders are gitignored.</p></section>`;
+        return;
+      }
+      const instruments = data.instruments || [];
+      const caveats = (data.caveats && data.caveats.length) ? data.caveats : DEFAULT_CAVEATS;
+      host.innerHTML = instruments.map((inst, i) => `
+        <section class="card">
+          <h2>${esc(inst.label || inst.symbol || 'Instrument')}</h2>
+          <p class="note">${periodText(inst)}</p>
+          <div class="grid">
+            <div>
+              <h3>Strategy vs buy-and-hold</h3>
+              ${table(inst.backtest || {})}
+            </div>
+            <div>
+              <h3>Equity</h3>
+              ${chartMount(inst, 'chart-' + i)}
+            </div>
+          </div>
+          <h3>Correctness checks</h3>
+          ${checksHtml(inst.checks)}
+          <h3>Risk controls</h3>
+          ${riskHtml(inst.agent)}
+        </section>
+      `).join('') + `<section class="card"><h2>Caveats</h2><ul>${caveats.map(line => `<li>${esc(line)}</li>`).join('')}</ul></section>`;
+      drawCharts(instruments);
+    }
+
+    async function loadCsvs() {
+      const pick = document.getElementById('csvPick');
+      try {
+        const data = await getJson('/api/validation/csvs');
+        const names = data.csvs || [];
+        pick.innerHTML = names.length
+          ? names.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('')
+          : '<option value="">No CSV in data/realdata</option>';
+      } catch (e) {
+        pick.innerHTML = '<option value="">Could not list data/realdata</option>';
+      }
+    }
+    async function refreshResults() {
+      const data = await getJson('/api/validation');
+      render(data);
+    }
+    async function pollStatus() {
+      const status = await getJson('/api/validation/status');
+      const state = document.getElementById('runState');
+      const log = document.getElementById('runLog');
+      if (status.running) {
+        state.textContent = 'Running ' + (status.filename || '') + '...';
+        log.hidden = false;
+        log.textContent = status.log || '';
+        return;
+      }
+      if (poll) { clearInterval(poll); poll = null; }
+      document.getElementById('runBtn').disabled = false;
+      if (status.exit_code === 0) {
+        state.textContent = 'Finished ' + (status.filename || '') + '.';
+        await refreshResults();
+      } else if (status.exit_code != null) {
+        state.textContent = status.error || 'Validation failed.';
+      }
+      if (status.log) { log.hidden = false; log.textContent = status.log; }
+    }
+    document.getElementById('runBtn').addEventListener('click', async () => {
+      const filename = document.getElementById('csvPick').value;
+      const bars = document.getElementById('barsPick').value;
+      if (!filename) { document.getElementById('runState').textContent = 'Add a CSV under data/realdata first.'; return; }
+      const symbol = filename.replace(/\.csv$/i, '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 20) || 'SYMBOL';
+      document.getElementById('runBtn').disabled = true;
+      document.getElementById('runState').textContent = 'Starting...';
+      try {
+        await postJson('/api/validation/run', { filename, symbol, bars });
+        if (poll) clearInterval(poll);
+        poll = setInterval(() => { pollStatus().catch(e => { document.getElementById('runState').textContent = e.message; }); }, 1000);
+      } catch (e) {
+        document.getElementById('runBtn').disabled = false;
+        document.getElementById('runState').textContent = e.message;
+      }
+    });
+    loadCsvs();
+    refreshResults().catch(e => { document.getElementById('body').innerHTML = `<p class="empty">${esc(e.message)}</p>`; });
+  </script>
+</body>
+</html>

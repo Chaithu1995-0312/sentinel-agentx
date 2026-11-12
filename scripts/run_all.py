@@ -27,6 +27,7 @@ os.environ.setdefault("PAPER_BROKER_URL", "http://127.0.0.1:8004")
 os.environ.setdefault("AGENT_ORCHESTRATOR_URL", "http://127.0.0.1:8005")
 os.environ.setdefault("JOURNAL_API_URL", "http://127.0.0.1:8006")
 os.environ.setdefault("SEED_OHLCV_PATH", str(ROOT / "seeds" / "ohlcv_sample.csv"))
+os.environ.setdefault("SEED_REGIME_PATH", str(ROOT / "seeds" / "ohlcv_regimes.json"))
 os.environ.setdefault("SEED_NEWS_PATH", str(ROOT / "seeds" / "news_sample.json"))
 os.environ.setdefault("KILL_SWITCH_PATH", str(ROOT / "data" / "kill_switch.json"))
 os.environ.setdefault("JOURNAL_PATH", str(ROOT / "data" / "journal.jsonl"))
@@ -45,7 +46,7 @@ SERVICES = [
     ("dashboard-ui", "services.dashboard-ui.main:app", int(os.getenv("DASHBOARD_UI_PORT", "8010"))),
 ]
 
-# Module paths use hyphens in folder names — uvicorn needs import path with underscores or file path.
+# Module paths use hyphens in folder names - uvicorn needs import path with underscores or file path.
 # Use --app-dir per service folder instead.
 
 
@@ -76,7 +77,7 @@ def main() -> int:
     procs = _procs()
 
     def _stop(*_args):
-        print("\n[run_all] shutting down…")
+        print("\n[run_all] shutting down...")
         for p in procs:
             p.send_signal(signal.SIGTERM)
         for p in procs:

@@ -16,3 +16,6 @@ build_artifacts/
 data/*.json
 data/*.jsonl
 !data/.gitkeep
+data/validation/
+data/realdata/
+data/*.tmp

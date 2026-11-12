@@ -7,17 +7,21 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="sentinel-journal-api", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import sys as _sys  # noqa: E402
+
+_SENTINEL_ROOT = Path(__file__).resolve().parents[2]
+if str(_SENTINEL_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_SENTINEL_ROOT))
+from shared.security import auth_headers, cors_kwargs, require_key  # noqa: E402,F401
+from shared.state_io import append_line, lock_for, write_text_atomic  # noqa: E402
+
+# CORS allow-list (dashboard origins + file:// hub), not "*". See shared/security.py.
+app.add_middleware(CORSMiddleware, **cors_kwargs())
 
 BUILD_ROOT = Path(__file__).resolve().parents[2]
 TOKEN_CAP = int(os.getenv("LLM_DAILY_TOKEN_CAP", "50000"))
@@ -50,9 +54,15 @@ def _load_entries() -> list[dict]:
 
 
 def _append(row: dict) -> None:
-    path = _journal_path()
-    with path.open("a") as f:
-        f.write(json.dumps(row) + "\n")
+    # Append-only, one JSON object per line, under a lock, fsynced.
+    append_line(_journal_path(), json.dumps(row))
+
+
+def _sentence(text: str) -> str:
+    text = str(text).strip()
+    if not text:
+        return text
+    return text if text[-1] in ".!?" else text + "."
 
 
 def _template_body(payload: dict) -> str:
@@ -68,17 +78,30 @@ def _template_body(payload: dict) -> str:
     ]
     if qty is not None and price is not None:
         parts.append(f"Size {qty} at about {price}.")
-    parts.append(f"Why: {reason}.")
+    parts.append(f"Why: {_sentence(reason)}")
     if allowed is False:
-        parts.append(f"Risk guard blocked it: {risk}.")
+        parts.append(f"Risk guard blocked it: {_sentence(risk)}")
     elif allowed is True:
         parts.append(f"Risk guard allowed it ({risk}).")
     if payload.get("stop_loss") is not None:
         parts.append(f"Stop loss at {payload['stop_loss']}.")
     if payload.get("take_profit") is not None:
         parts.append(f"Take profit at {payload['take_profit']}.")
+    if payload.get("strategy"):
+        parts.append(f"Strategy in use: {payload['strategy']}.")
+    selection = payload.get("selection_reason")
+    if selection and selection != reason:
+        parts.append(f"Strategy pick: {_sentence(selection)}")
+    if payload.get("news_score") is not None or payload.get("news_reason"):
+        if payload.get("news_score") is None:
+            parts.append(_sentence(f"News: {payload.get('news_reason')}"))
+        else:
+            news_line = f"News score {float(payload['news_score']):.2f}."
+            if payload.get("news_reason"):
+                news_line = f"{news_line} {payload['news_reason']}"
+            parts.append(_sentence(news_line))
     if payload.get("vs_buy_hold"):
-        parts.append(f"Backtest note: {payload['vs_buy_hold']}.")
+        parts.append(f"Backtest note: {_sentence(payload['vs_buy_hold'])}")
     return " ".join(parts)
 
 
@@ -104,6 +127,10 @@ class TradeJournal(BaseModel):
     risk_reason: str | None = None
     allowed: bool | None = None
     vs_buy_hold: str | None = None
+    strategy: str | None = None
+    selection_reason: str | None = None
+    news_score: float | None = None
+    news_reason: str | None = None
     tags: list[str] = Field(default_factory=list)
     extra: dict = Field(default_factory=dict)
 
@@ -126,7 +153,7 @@ def list_entries(limit: int = 50):
     return {"entries": rows[-limit:], "count": len(rows)}
 
 
-@app.post("/entries")
+@app.post("/entries", dependencies=[Depends(require_key)])
 def add_entry(body: Entry):
     text = body.body or _template_body(body.structured)
     row = {
@@ -141,7 +168,7 @@ def add_entry(body: Entry):
     return row
 
 
-@app.post("/trade")
+@app.post("/trade", dependencies=[Depends(require_key)])
 def add_trade(body: TradeJournal):
     structured = {
         "symbol": body.symbol,
@@ -156,6 +183,10 @@ def add_trade(body: TradeJournal):
         "risk_reason": body.risk_reason,
         "allowed": body.allowed,
         "vs_buy_hold": body.vs_buy_hold,
+        "strategy": body.strategy,
+        "selection_reason": body.selection_reason,
+        "news_score": body.news_score,
+        "news_reason": body.news_reason,
         **body.extra,
     }
     title = body.title or f"{structured['action']} {body.symbol}".strip()
@@ -173,9 +204,11 @@ def add_trade(body: TradeJournal):
     return row
 
 
-@app.delete("/entries")
+@app.delete("/entries", dependencies=[Depends(require_key)])
 def clear_entries():
+    """Demo reset only (used by demo_check); the agent never calls it."""
     path = _journal_path()
-    if path.exists():
-        path.write_text("")
+    with lock_for(path):
+        if path.exists():
+            write_text_atomic(path, "")
     return {"status": "cleared"}
