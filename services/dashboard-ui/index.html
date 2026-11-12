@@ -201,6 +201,10 @@
     .tag.sell, .tag.kill { background: rgba(255, 59, 48, .16); color: #ff8d87; }
     .tag.hold { background: #243044; color: #c5d0e2; }
     .tag.veto { background: rgba(245, 185, 66, .16); color: var(--amber); }
+    .tag.llm { background: rgba(126, 176, 255, .18); color: var(--blue); }
+    .tag.wordlist { background: #243044; color: #c5d0e2; }
+    .tag.fallback { background: rgba(245, 185, 66, .16); color: var(--amber); }
+    .news-cycle { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 10px; }
     .entry p { margin: 8px 0 0; font-size: .88rem; }
     dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; font-size: .88rem; }
     dt { color: var(--muted); }
@@ -283,7 +287,7 @@
       </article>
       <article class="card">
         <h2>News</h2>
-        <p class="panel-note">Lexicon score. Green is positive, red is negative. VETO marks a headline that blocked a buy.</p>
+        <p class="panel-note">Headline list uses word-list scores; backtests never call Grok. After a paper cycle, the live signal's score and scorer (word list or optional Grok) show above when present. VETO marks a headline that blocked a buy.</p>
         <div id="news" class="news-list"><p class="empty">Loading headlines...</p></div>
       </article>
     </section>
@@ -611,18 +615,46 @@
       },
     };
 
-    function renderNews(bt) {
+    function newsScorerChips(structured) {
+      const meta = structured && structured.news_scorer;
+      if (!meta || typeof meta !== 'object') return '';
+      const chips = [];
+      if (structured.news_score != null && !Number.isNaN(Number(structured.news_score))) {
+        const n = Number(structured.news_score);
+        const sign = n > 0 ? '+' : '';
+        const cls = n >= 0.15 ? 'pos' : (n <= -0.05 ? 'neg' : 'flat');
+        chips.push('<span class="chip ' + cls + '">news ' + sign + n.toFixed(2) + '</span>');
+      }
+      const scorer = String(meta.scorer || '');
+      if (scorer === 'llm') chips.push('<span class="tag llm">scorer: llm</span>');
+      else if (scorer) chips.push('<span class="tag wordlist">scorer: ' + esc(scorer) + '</span>');
+      if (meta.fallback_reason) {
+        chips.push('<span class="tag fallback">fallback: ' + esc(String(meta.fallback_reason)) + '</span>');
+      }
+      return chips.join('');
+    }
+    function latestNewsStructured(journal) {
+      const entries = (journal && journal.entries) || [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const s = entries[i].structured || {};
+        if (s.news_scorer) return s;
+      }
+      return null;
+    }
+    function renderNews(bt, journal) {
       const host = document.getElementById('news');
       const items = (bt && bt.scored_news) || [];
+      const meta = latestNewsStructured(journal);
+      const summary = meta ? '<div class="news-cycle">' + newsScorerChips(meta) + '</div>' : '';
       if (!items.length) {
-        host.innerHTML = '<p class="empty">No scored headlines. market-ingest or strategy-engine is offline.</p>';
+        host.innerHTML = summary + '<p class="empty">No scored headlines. market-ingest or strategy-engine is offline.</p>';
         return;
       }
       const rows = items.slice().sort((a, b) => {
         if (!!b.veto !== !!a.veto) return (b.veto ? 1 : 0) - (a.veto ? 1 : 0);
         return String(b.date).localeCompare(String(a.date));
       });
-      host.innerHTML = rows.map(item => {
+      host.innerHTML = summary + rows.map(item => {
         const score = Number(item.score);
         const cls = score >= 0.15 ? 'pos' : (score <= -0.05 ? 'neg' : 'flat');
         const sign = score > 0 ? '+' : '';
@@ -653,7 +685,8 @@
       host.innerHTML = entries.slice().reverse().map(entry => {
         const when = entry.ts ? new Date(entry.ts * 1000).toLocaleString() : '';
         const tags = journalTags(entry).map(tag => `<span class="tag ${esc(tag)}">${esc(tag)}</span>`).join('');
-        return `<article class="entry"><div class="entry-top"><strong>${esc(entry.title || 'Note')}</strong><span class="meta">${esc(when)}</span></div><p>${esc(entry.body || '')}</p><div class="tags">${tags}</div></article>`;
+        const newsChips = newsScorerChips(entry.structured || {});
+        return `<article class="entry"><div class="entry-top"><strong>${esc(entry.title || 'Note')}</strong><span class="meta">${esc(when)}</span></div><p>${esc(entry.body || '')}</p><div class="tags">${tags}${newsChips}</div></article>`;
       }).join('');
     }
 
@@ -722,7 +755,7 @@
         renderTabs();
         renderActiveTable();
         drawChart(bt);
-        renderNews(bt);
+        renderNews(bt, journal);
         if (journal) renderJournal(journal);
         else document.getElementById('journal').innerHTML = '<p class="empty">Journal offline.</p>';
         renderRisk(health, riskState, fills);
